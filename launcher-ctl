@@ -1,0 +1,14 @@
+#!/bin/sh
+# Control the launcher daemon
+# Usage: launcher-ctl [toggle|show|hide]
+
+SOCKET="/tmp/launcher.sock"
+
+cmd="${1:-toggle}"
+
+if [ ! -S "$SOCKET" ]; then
+    echo "Launcher daemon not running (socket not found)" >&2
+    exit 1
+fi
+
+echo "$cmd" | nc -U -N "$SOCKET" 2>/dev/null || echo "$cmd" | socat - UNIX-CONNECT:"$SOCKET" 2>/dev/null

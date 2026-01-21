@@ -1,0 +1,23 @@
+version: "0.5"
+# Run with: process-compose up --no-server
+# Must run from inside: nix develop
+
+processes:
+  launcher:
+    command: cargo build && ./target/debug/launcher
+    working_dir: .
+    availability:
+      restart: on_failure
+      backoff_seconds: 2
+    shutdown:
+      signal: 15
+      timeout_seconds: 3
+
+  watch:
+    command: sleep 3 && cargo watch -w src -w Cargo.toml -x build -s 'pkill -x launcher || true'
+    working_dir: .
+    availability:
+      restart: on_failure
+    depends_on:
+      launcher:
+        condition: process_started
