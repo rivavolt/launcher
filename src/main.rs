@@ -76,7 +76,8 @@ fn main() -> iced::Result {
 enum Entry {
     Desktop {
         name: String,
-        exec: String,
+        desktop_file: PathBuf,
+        action: Option<String>,
         icon: Option<PathBuf>,
         keywords: Vec<String>,
     },
@@ -590,18 +591,17 @@ impl App {
 
 fn activate(entry: &Entry) {
     match entry {
-        Entry::Desktop { exec, .. } => {
-            let cmd: String = exec
-                .split_whitespace()
-                .filter(|s| !s.starts_with('%'))
-                .collect::<Vec<_>>()
-                .join(" ");
-            let _ = Command::new("setsid")
-                .args(["-f", "sh", "-c", &cmd])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
+        Entry::Desktop { desktop_file, action, .. } => {
+            let mut cmd = Command::new("gio");
+            cmd.arg("launch");
+            if let Some(action_id) = action {
+                cmd.arg(format!("--action={}", action_id));
+            }
+            cmd.arg(desktop_file);
+            cmd.stdin(std::process::Stdio::null())
+               .stdout(std::process::Stdio::null())
+               .stderr(std::process::Stdio::null());
+            let _ = cmd.spawn();
         }
         Entry::Window { address, .. } => {
             let _ = Command::new("hyprctl")
@@ -861,18 +861,21 @@ fn parse_desktop_file(path: &PathBuf, icon_index: &HashMap<String, PathBuf>) -> 
     });
 
     // Add main entry
-    if let (Some(name), Some(exec)) = (main_name.clone(), main_exec) {
-        entries.push(Entry::Desktop {
-            name,
-            exec,
-            icon: icon.clone(),
-            keywords: keywords.clone(),
-        });
+    if let Some(name) = main_name.clone() {
+        if main_exec.is_some() {
+            entries.push(Entry::Desktop {
+                name,
+                desktop_file: path.clone(),
+                action: None,
+                icon: icon.clone(),
+                keywords: keywords.clone(),
+            });
+        }
     }
 
     // Add action entries
     for action_id in actions_list {
-        if let Some((Some(action_name), Some(action_exec))) = actions.get(&action_id) {
+        if let Some((Some(action_name), Some(_))) = actions.get(&action_id) {
             let display_name = if let Some(ref app_name) = main_name {
                 format!("{}: {}", app_name, action_name)
             } else {
@@ -880,7 +883,8 @@ fn parse_desktop_file(path: &PathBuf, icon_index: &HashMap<String, PathBuf>) -> 
             };
             entries.push(Entry::Desktop {
                 name: display_name,
-                exec: action_exec.clone(),
+                desktop_file: path.clone(),
+                action: Some(action_id.clone()),
                 icon: icon.clone(),
                 keywords: vec![],
             });
