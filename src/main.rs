@@ -594,8 +594,10 @@ impl App {
 fn activate(entry: &Entry) {
     match entry {
         Entry::Desktop { desktop_file, action, exec, terminal, .. } => {
-            if *terminal {
-                // Terminal apps: use $TERMINAL or fall back to common terminals
+            // Actions always use gio launch (even for terminal apps like ghostty)
+            // Terminal=true without action means run the Exec line in a terminal
+            if *terminal && action.is_none() {
+                // Terminal apps without action: use $TERMINAL
                 if let Some(exec_line) = exec {
                     let cmd_str: String = exec_line
                         .split_whitespace()
@@ -611,7 +613,7 @@ fn activate(entry: &Entry) {
                         .spawn();
                 }
             } else {
-                // GUI apps: use gio launch
+                // GUI apps or actions: use gio launch
                 let mut cmd = Command::new("gio");
                 cmd.arg("launch");
                 if let Some(action_id) = action {

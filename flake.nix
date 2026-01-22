@@ -25,12 +25,18 @@
             fontconfig
             freetype
           ];
-          nativeBuildInputs = with pkgs; [ pkg-config makeWrapper ];
+          nativeBuildInputs = with pkgs; [ pkg-config makeWrapper mold clang ];
+
+          # Use mold linker for faster builds
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = "clang";
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
 
           # Build deps only (for caching)
           cargoArtifacts = craneLib.buildDepsOnly {
             src = craneLib.cleanCargoSource ./.;
             inherit buildInputs nativeBuildInputs;
+            CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = "clang";
+            CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
           };
 
           # Build the actual package
@@ -38,6 +44,8 @@
             inherit cargoArtifacts buildInputs nativeBuildInputs;
             src = craneLib.cleanCargoSource ./.;
             doCheck = false; # Skip tests for faster builds
+            CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = "clang";
+            CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
 
             postInstall = ''
               wrapProgram $out/bin/launcher \

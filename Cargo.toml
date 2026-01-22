@@ -11,7 +11,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [profile.release]
-lto = true
-codegen-units = 1
+lto = "thin"
+codegen-units = 8
 panic = "abort"
 strip = true
+
+[profile.dev]
+opt-level = 0
+debug = 1
+incremental = true
+
+[profile.dev.package."*"]
+opt-level = 2  # Optimize deps but not your code
