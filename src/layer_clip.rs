@@ -383,8 +383,9 @@ fn get_clip_size() -> (f32, f32) {
         .and_then(|o| serde_json::from_slice::<Vec<serde_json::Value>>(&o.stdout).ok())
         .and_then(|m| m.first().and_then(|m| {
             let w = m["width"].as_f64()?;
-            // Golden ratio: 61.8% of physical screen width
-            Some((w * 0.618) as f32)
+            let s = m["scale"].as_f64().unwrap_or(1.0);
+            // Golden ratio: 61.8% of logical screen width (eframe applies scaling)
+            Some((w / s * 0.618) as f32)
         }))
         .unwrap_or(500.0);
 
