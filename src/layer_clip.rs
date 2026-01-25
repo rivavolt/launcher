@@ -100,8 +100,10 @@ impl App {
     }
 
     fn load_entries(&mut self, ctx: &Context) {
+        let old_selected = self.selected;
         self.entries = collect(ctx, &self.re, &mut self.textures);
-        self.filtered = (0..self.entries.len().min(50)).collect();
+        self.filter(); // Reapply current query filter
+        self.selected = old_selected.min(self.filtered.len().saturating_sub(1));
         self.loaded = true;
     }
 
