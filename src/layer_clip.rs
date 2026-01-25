@@ -379,17 +379,17 @@ fn get_clip_size() -> (f32, f32) {
     let height = input_height + list_height + 24.0;
 
     // Wider window for side-by-side layout (golden ratio inverse ~0.618)
-    let (width, scale) = Command::new("hyprctl").args(["monitors", "-j"]).output().ok()
+    let width = Command::new("hyprctl").args(["monitors", "-j"]).output().ok()
         .and_then(|o| serde_json::from_slice::<Vec<serde_json::Value>>(&o.stdout).ok())
         .and_then(|m| m.first().and_then(|m| {
             let w = m["width"].as_f64()?;
             let s = m["scale"].as_f64().unwrap_or(1.0);
             let logical_w = w / s;
-            Some(((logical_w * 0.618 / s) as f32, s))
+            Some((logical_w * 0.618) as f32)
         }))
-        .unwrap_or((500.0, 1.0));
+        .unwrap_or(500.0);
 
-    (width, height / scale as f32)
+    (width, height)
 }
 
 fn temp_dir() -> PathBuf {
