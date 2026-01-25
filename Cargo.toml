@@ -3,14 +3,26 @@ name = "launcher"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "launcher-layer"
+path = "src/layer_launcher.rs"
+
+[[bin]]
+name = "clip-layer"
+path = "src/layer_clip.rs"
+
 [dependencies]
-iced = { version = "0.13", features = ["image", "tokio", "advanced"] }
-tokio = { version = "1", features = ["time"] }
+wayapp = { path = "vendor/wayapp" }
+egui = "0.33"
+smithay-client-toolkit = "0.20"
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 nucleo-matcher = "0.3"
 strsim = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 env_logger = "0.11"
+regex = "1"
 
 [profile.release]
 lto = "thin"
