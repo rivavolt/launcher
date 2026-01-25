@@ -122,7 +122,7 @@ struct App {
     entries: Vec<Entry>,
     filtered: Vec<usize>,
     selected: usize,
-    should_exit: bool,
+    should_hide: bool,
     loaded: bool,
     // Key repeat state
     held_key: Option<(egui::Key, std::time::Instant)>,
@@ -137,7 +137,7 @@ impl App {
             entries: Vec::new(),
             filtered: Vec::new(),
             selected: 0,
-            should_exit: false,
+            should_hide: false,
             loaded: false,
             held_key: None,
             matcher: Matcher::new(Config::DEFAULT),
@@ -256,7 +256,19 @@ impl App {
                 }
             }
         }
-        self.should_exit = true;
+        self.should_hide = true;
+    }
+
+    fn hide_and_reset(&mut self) {
+        // Reset state
+        self.query.clear();
+        self.selected = 0;
+        self.filtered = (0..self.entries.len().min(50)).collect();
+        self.should_hide = false;
+        // Toggle special workspace to hide
+        let _ = Command::new("hyprctl")
+            .args(["dispatch", "togglespecialworkspace", "launcher"])
+            .spawn();
     }
 
     fn render(&mut self, ctx: &Context) {
@@ -289,7 +301,7 @@ impl App {
             for event in &i.events {
                 if let egui::Event::Key { key, pressed: true, modifiers, .. } = event {
                     match key {
-                        egui::Key::Escape => self.should_exit = true,
+                        egui::Key::Escape => self.should_hide = true,
                         egui::Key::Enter => activate = true,
                         egui::Key::ArrowDown => { down = true; self.held_key = Some((egui::Key::ArrowDown, now)); }
                         egui::Key::ArrowUp => { up = true; self.held_key = Some((egui::Key::ArrowUp, now)); }
@@ -508,8 +520,8 @@ impl eframe::App for App {
             self.load_entries(ctx);
         }
         self.render(ctx);
-        if self.should_exit {
-            std::process::exit(0);
+        if self.should_hide {
+            self.hide_and_reset();
         }
     }
 }
