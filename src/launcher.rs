@@ -556,28 +556,18 @@ fn main() -> eframe::Result<()> {
 }
 
 fn get_launcher_size() -> (f32, f32) {
-    let row_height = ICON_CONTAINER + ROW_PADDING * 2.0;
-    let input_height = INPUT_SIZE + INPUT_PADDING * 2.0;
-    // Height based on content: input + max visible items + padding
-    let height = input_height + (MAX_VISIBLE_ITEMS as f32 * row_height) + 16.0;
-
-    let width = Command::new("hyprctl").args(["monitors", "-j"]).output().ok()
+    Command::new("hyprctl").args(["monitors", "-j"]).output().ok()
         .and_then(|o| serde_json::from_slice::<Vec<serde_json::Value>>(&o.stdout).ok())
         .and_then(|m| m.first().and_then(|m| {
             let w = m["width"].as_f64()?;
+            let h = m["height"].as_f64()?;
             let s = m["scale"].as_f64().unwrap_or(1.0);
             // eframe applies 2x scaling, so: logical_target / 2
-            Some((w / s * 0.382 / 2.0) as f32)
+            // Width: 38.2% (smaller golden ratio portion)
+            // Height: 61.8% (same for both launcher and clipboard)
+            Some(((w / s * 0.382 / 2.0) as f32, (h / s * 0.618 / 2.0) as f32))
         }))
-        .unwrap_or(300.0);
-
-    // Divide height by scale too
-    let scale = Command::new("hyprctl").args(["monitors", "-j"]).output().ok()
-        .and_then(|o| serde_json::from_slice::<Vec<serde_json::Value>>(&o.stdout).ok())
-        .and_then(|m| m.first().and_then(|m| m["scale"].as_f64()))
-        .unwrap_or(1.0);
-
-    (width, (height / scale as f32))
+        .unwrap_or((300.0, 400.0))
 }
 
 fn build_icon_index() -> HashMap<String, PathBuf> {
