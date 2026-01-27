@@ -258,6 +258,7 @@ pub fn cache_svgs(index: &mut HashMap<String, PathBuf>) {
                 continue;
             }
 
+            let output = format!("png32:{}", cached.display());
             let ok = std::process::Command::new("magick")
                 .args([
                     std::ffi::OsStr::new("-background"),
@@ -265,7 +266,7 @@ pub fn cache_svgs(index: &mut HashMap<String, PathBuf>) {
                     path.as_os_str(),
                     std::ffi::OsStr::new("-resize"),
                     std::ffi::OsStr::new("128x128"),
-                    cached.as_os_str(),
+                    std::ffi::OsStr::new(&output),
                 ])
                 .status()
                 .is_ok_and(|s| s.success());
