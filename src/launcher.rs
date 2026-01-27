@@ -493,6 +493,11 @@ impl eframe::App for App {
             self.should_hide = true;
         }
 
+        if !ctx.input(|i| i.focused) {
+            CentralPanel::default().frame(common::panel_frame()).show(ctx, |_| {});
+            return;
+        }
+
         if self._hypr_thread.is_none() {
             self.setup_hyprland_events(ctx);
         }
