@@ -190,7 +190,7 @@ pub fn collect_entries() -> Vec<DesktopEntry> {
 /// Build icon index from system icon theme directories (hicolor + pixmaps)
 pub fn build_icon_index() -> HashMap<String, PathBuf> {
     let mut index = HashMap::new();
-    let sizes = ["48x48", "64x64", "128x128", "256x256", "32x32", "scalable"];
+    let sizes = ["48x48", "64x64", "128x128", "256x256", "512x512", "32x32", "scalable"];
 
     let mut dirs = vec![
         PathBuf::from("/run/current-system/sw/share/icons"),
@@ -214,7 +214,6 @@ pub fn build_icon_index() -> HashMap<String, PathBuf> {
                 if let Ok(entries) = fs::read_dir(&dir) {
                     for e in entries.flatten() {
                         let path = e.path();
-                        if path.extension().is_some_and(|e| e == "svg") { continue; }
                         if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                             index.entry(stem.to_string()).or_insert(path);
                         }
@@ -228,7 +227,6 @@ pub fn build_icon_index() -> HashMap<String, PathBuf> {
         if let Ok(entries) = fs::read_dir(pixmaps) {
             for e in entries.flatten() {
                 let path = e.path();
-                if path.extension().is_some_and(|e| e == "svg") { continue; }
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                     index.entry(stem.to_string()).or_insert(path);
                 }
@@ -236,6 +234,47 @@ pub fn build_icon_index() -> HashMap<String, PathBuf> {
         }
     }
     index
+}
+
+/// Convert SVG icons to cached PNGs via ImageMagick.
+/// Updates the index in-place to point to the cached PNG paths.
+pub fn cache_svgs(index: &mut HashMap<String, PathBuf>) {
+    let cache_dir = svg_cache_dir();
+    let _ = fs::create_dir_all(&cache_dir);
+
+    for (_name, path) in index.iter_mut() {
+        if path.extension().is_some_and(|e| e == "svg") {
+            let cached = cache_dir.join(
+                path.file_stem().unwrap_or_default()
+            ).with_extension("png");
+
+            if cached.exists() {
+                *path = cached;
+                continue;
+            }
+
+            let ok = std::process::Command::new("magick")
+                .args([
+                    std::ffi::OsStr::new("-background"),
+                    std::ffi::OsStr::new("none"),
+                    path.as_os_str(),
+                    std::ffi::OsStr::new("-resize"),
+                    std::ffi::OsStr::new("128x128"),
+                    cached.as_os_str(),
+                ])
+                .status()
+                .is_ok_and(|s| s.success());
+
+            if ok {
+                *path = cached;
+            }
+        }
+    }
+}
+
+fn svg_cache_dir() -> PathBuf {
+    let runtime = env::var("XDG_RUNTIME_DIR").unwrap_or("/tmp".into());
+    PathBuf::from(runtime).join("launcher-svg-cache")
 }
 
 /// Build WMClass to icon path mapping from already-parsed desktop entries

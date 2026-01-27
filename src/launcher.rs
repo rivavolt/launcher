@@ -159,7 +159,8 @@ impl App {
 
     fn load_entries(&mut self, ctx: &Context) {
         let old_selected = self.selected;
-        let icon_index = desktop::build_icon_index();
+        let mut icon_index = desktop::build_icon_index();
+        desktop::cache_svgs(&mut icon_index);
         let desktop_entries = desktop::collect_entries();
         let wmclass_icons = desktop::wmclass_icon_map(&desktop_entries, &icon_index);
 
