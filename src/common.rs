@@ -23,7 +23,6 @@ pub mod colors {
     pub const TEXT_MUTED: Color32 = Color32::from_rgb(80, 80, 80);
     pub const GHOST_TEXT: Color32 = Color32::from_rgba_premultiplied(120, 120, 120, 140);
     pub const ACCENT: Color32 = Color32::from_rgb(100, 160, 220);
-    pub const ICON_BG: Color32 = Color32::from_rgba_premultiplied(255, 255, 255, 15);
 }
 
 /// Render a selectable row with automatic scroll-into-view
