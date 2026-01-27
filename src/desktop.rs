@@ -167,6 +167,7 @@ pub fn parse_desktop_file(path: &Path) -> Vec<DesktopEntry> {
 /// Collect all desktop entries from XDG dirs, deduplicated by filename
 pub fn collect_entries() -> Vec<DesktopEntry> {
     let mut seen_files = std::collections::HashSet::new();
+    let mut seen_names = std::collections::HashSet::new();
     let mut entries = Vec::new();
 
     for dir in applications_dirs() {
@@ -176,7 +177,11 @@ pub fn collect_entries() -> Vec<DesktopEntry> {
                 if path.extension().is_some_and(|e| e == "desktop") {
                     let key = path.file_name().unwrap().to_string_lossy().to_string();
                     if seen_files.insert(key) {
-                        entries.extend(parse_desktop_file(&path));
+                        for de in parse_desktop_file(&path) {
+                            if seen_names.insert(de.name.to_lowercase()) {
+                                entries.push(de);
+                            }
+                        }
                     }
                 }
             }
