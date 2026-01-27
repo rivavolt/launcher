@@ -1,9 +1,8 @@
 //! Clipboard manager using eframe (regular window in special workspace)
 
-mod common;
-
-use common::{colors, handle_navigation_keys, truncate};
-use common::{INPUT_PADDING, INPUT_SIZE, MAX_VISIBLE_ITEMS, ROW_HEIGHT, TEXT_SIZE};
+use launcher::common::{colors, handle_navigation_keys, truncate};
+use launcher::common::{INPUT_PADDING, INPUT_SIZE, ROW_HEIGHT, TEXT_SIZE};
+use launcher::hyprland;
 use eframe::egui::{self, CentralPanel, Context, Frame, Color32, RichText, ScrollArea, FontFamily, FontId, Ui};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use regex::Regex;
@@ -56,7 +55,6 @@ impl App {
     fn setup_watcher(&mut self, ctx: &Context) {
         use std::sync::atomic::Ordering;
 
-        // Watch the directory, not the file (cliphist does atomic writes via rename)
         let db_dir = std::env::var("HOME")
             .map(|h| PathBuf::from(h).join(".cache/cliphist"))
             .unwrap_or_else(|_| PathBuf::from("/tmp/cliphist"));
@@ -67,11 +65,10 @@ impl App {
         if let Ok(mut watcher) = RecommendedWatcher::new(
             move |res: Result<notify::Event, notify::Error>| {
                 if let Ok(event) = res {
-                    // Only reload on modifications to 'db' file
-                    let dominated_db = event.paths.iter().any(|p| {
+                    let is_db = event.paths.iter().any(|p| {
                         p.file_name().is_some_and(|n| n == "db")
                     });
-                    if dominated_db {
+                    if is_db {
                         needs_reload.store(true, Ordering::SeqCst);
                         ctx.request_repaint();
                     }
@@ -102,7 +99,7 @@ impl App {
     fn load_entries(&mut self, ctx: &Context) {
         let old_selected = self.selected;
         self.entries = collect(ctx, &self.re, &mut self.textures);
-        self.filter(); // Reapply current query filter
+        self.filter();
         self.selected = old_selected.min(self.filtered.len().saturating_sub(1));
         self.loaded = true;
     }
@@ -139,15 +136,11 @@ impl App {
     }
 
     fn hide_and_reset(&mut self) {
-        // Reset state
         self.query.clear();
         self.selected = 0;
         self.filter();
         self.should_hide = false;
-        // Toggle special workspace to hide
-        let _ = Command::new("hyprctl")
-            .args(["dispatch", "togglespecialworkspace", "clipboard"])
-            .spawn();
+        hyprland::dispatch_async("togglespecialworkspace", "clipboard");
     }
 
     fn delete(&mut self, ctx: &Context) {
@@ -165,10 +158,8 @@ impl App {
         let max_sel = self.filtered.len().saturating_sub(1);
         let (mut activate, mut delete) = (false, false);
 
-        // Handle navigation with shared helper
         let (down, up) = handle_navigation_keys(ctx, &mut self.held_key);
 
-        // Handle clipboard-specific keys
         ctx.input(|i| {
             for event in &i.events {
                 if let egui::Event::Key { key, pressed: true, modifiers, .. } = event {
@@ -187,7 +178,6 @@ impl App {
         if activate { self.activate(); return; }
         if delete { self.delete(ctx); }
 
-        // Ensure texture is loaded for selected image (lazy loading)
         if let Some(&idx) = self.filtered.get(self.selected) {
             self.ensure_texture(ctx, idx);
         }
@@ -201,7 +191,6 @@ impl App {
 
                 ui.add_space(4.0);
 
-                // Input row (full width)
                 ui.horizontal(|ui: &mut Ui| {
                     ui.add_space(INPUT_PADDING);
 
@@ -224,13 +213,10 @@ impl App {
 
                 ui.add_space(8.0);
 
-                // Main content: list on left, preview on right
                 let list_height = screen.height() - INPUT_SIZE - INPUT_PADDING * 2.0 - 20.0;
                 let scroll_to_selected = down || up;
 
-                // Use columns for side-by-side layout
                 ui.columns(2, |cols| {
-                    // Left column: scrollable list
                     let list_ui = &mut cols[0];
                     ScrollArea::vertical()
                         .id_salt("clip_list")
@@ -291,7 +277,6 @@ impl App {
                             }
                         });
 
-                    // Right column: preview
                     let preview_ui = &mut cols[1];
                     if let Some(&idx) = self.filtered.get(self.selected) {
                         let e = &self.entries[idx];
@@ -330,12 +315,10 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &Context, _: &mut eframe::Frame) {
         use std::sync::atomic::Ordering;
 
-        // Set up watcher on first update (need Context)
         if self._watcher.is_none() {
             self.setup_watcher(ctx);
         }
 
-        // Check for file change events
         if self.needs_reload.swap(false, Ordering::SeqCst) {
             self.load_entries(ctx);
         }
@@ -351,7 +334,7 @@ impl eframe::App for App {
 }
 
 fn main() -> eframe::Result<()> {
-    let (width, height) = get_clip_size();
+    let (width, height) = hyprland::window_size(0.618, 0.618, (500.0, 400.0));
 
     eframe::run_native(
         "clipboard",
@@ -371,21 +354,6 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(App::new()))
         }),
     )
-}
-
-fn get_clip_size() -> (f32, f32) {
-    Command::new("hyprctl").args(["monitors", "-j"]).output().ok()
-        .and_then(|o| serde_json::from_slice::<Vec<serde_json::Value>>(&o.stdout).ok())
-        .and_then(|m| m.first().and_then(|m| {
-            let w = m["width"].as_f64()?;
-            let h = m["height"].as_f64()?;
-            let s = m["scale"].as_f64().unwrap_or(1.0);
-            // eframe applies 2x scaling, so: logical_target / 2
-            // Width: 61.8% (larger golden ratio portion)
-            // Height: 61.8% (same for both launcher and clipboard)
-            Some(((w / s * 0.618 / 2.0) as f32, (h / s * 0.618 / 2.0) as f32))
-        }))
-        .unwrap_or((500.0, 400.0))
 }
 
 fn temp_dir() -> PathBuf {
