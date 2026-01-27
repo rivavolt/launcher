@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::{env, fs};
 
 /// Icon reference — either an absolute path or a theme name to look up
+#[derive(Clone)]
 pub enum Icon {
     Path(PathBuf),
     Name(String),
@@ -134,7 +135,7 @@ pub fn parse_desktop_file(path: &Path) -> Vec<DesktopEntry> {
             generic_name: main_generic_name.clone(),
             exec,
             terminal,
-            icon: main_icon,
+            icon: main_icon.clone(),
             keywords: main_keywords.clone(),
             wm_class: main_wm_class.clone(),
         });
@@ -153,7 +154,7 @@ pub fn parse_desktop_file(path: &Path) -> Vec<DesktopEntry> {
                 generic_name: None,
                 exec: action_exec.clone(),
                 terminal,
-                icon: main_wm_class.as_ref().and(None), // actions don't own the icon
+                icon: main_icon.clone(),
                 keywords: vec![],
                 wm_class: None,
             });
