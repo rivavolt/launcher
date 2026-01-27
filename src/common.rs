@@ -17,7 +17,7 @@ pub const REPEAT_INTERVAL_MS: u128 = 120;
 // Colors
 pub mod colors {
     use eframe::egui::Color32;
-    pub const BG_BASE: Color32 = Color32::from_rgba_premultiplied(12, 12, 12, 200);
+    pub const BG_BASE: Color32 = Color32::from_rgba_premultiplied(12, 12, 12, 160);
     pub const BG_INPUT: Color32 = Color32::from_rgb(5, 5, 5);
     pub const BG_SELECTED: Color32 = Color32::from_rgba_premultiplied(60, 100, 160, 50);
     pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(240, 240, 240);
@@ -182,6 +182,26 @@ pub fn handle_navigation_keys(
     }
 
     (down, up)
+}
+
+/// Configure transparent style on the egui context
+pub fn setup_transparent_style(cc: &eframe::CreationContext) {
+    let mut style = egui::Style::default();
+    style.visuals.window_fill = egui::Color32::TRANSPARENT;
+    style.visuals.panel_fill = egui::Color32::TRANSPARENT;
+    cc.egui_ctx.set_style(style);
+}
+
+/// Build NativeOptions for a transparent, undecorated window
+pub fn window_options(app_id: &str, width: f32, height: f32) -> eframe::NativeOptions {
+    eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([width, height])
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_app_id(app_id),
+        ..Default::default()
+    }
 }
 
 /// Truncate string to max characters with ellipsis

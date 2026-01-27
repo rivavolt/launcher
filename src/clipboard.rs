@@ -4,7 +4,7 @@ use launcher::common::{self, colors, handle_navigation_keys, truncate};
 use launcher::scroll::ScrollMomentum;
 use launcher::common::{INPUT_SIZE, ROW_HEIGHT, TEXT_SIZE};
 use launcher::hyprland;
-use eframe::egui::{self, CentralPanel, Context, Color32, RichText, ScrollArea, FontFamily, FontId, Ui};
+use eframe::egui::{self, CentralPanel, Context, RichText, ScrollArea, FontFamily, FontId, Ui};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
@@ -35,6 +35,7 @@ struct App {
     needs_reload: std::sync::Arc<std::sync::atomic::AtomicBool>,
     _watcher: Option<RecommendedWatcher>,
     scroll_momentum: ScrollMomentum,
+    last_ensured: Option<usize>,
 }
 
 impl App {
@@ -55,6 +56,7 @@ impl App {
             needs_reload: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             _watcher: None,
             scroll_momentum: ScrollMomentum::new(),
+            last_ensured: None,
         }
     }
 
@@ -71,7 +73,12 @@ impl App {
         if let Ok(mut watcher) = RecommendedWatcher::new(
             move |res: Result<notify::Event, notify::Error>| {
                 if let Ok(event) = res {
-                    let is_db = event.paths.iter().any(|p| {
+                    use notify::EventKind;
+                    let is_write = matches!(
+                        event.kind,
+                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                    );
+                    let is_db = is_write && event.paths.iter().any(|p| {
                         p.file_name().is_some_and(|n| n == "db")
                     });
                     if is_db {
@@ -128,6 +135,7 @@ impl App {
     fn load_entries(&mut self, ctx: &Context) {
         let old_selected = self.selected;
         self.failed_textures.clear();
+        self.last_ensured = None;
         self.entries = collect(ctx, &self.re, &mut self.textures);
         self.filter();
         self.selected = old_selected.min(self.filtered.len().saturating_sub(1));
@@ -196,6 +204,7 @@ impl App {
                     match key {
                         egui::Key::Escape => self.should_hide = true,
                         egui::Key::Enter => activate = true,
+                        egui::Key::C if modifiers.ctrl => activate = true,
                         egui::Key::D if modifiers.ctrl => delete = true,
                         _ => {}
                     }
@@ -208,10 +217,13 @@ impl App {
         if activate { self.activate(); return; }
         if delete { self.delete(ctx); }
 
-        // Ensure texture + full text for selected entry
+        // Ensure texture + full text for selected entry (skip if unchanged)
         if let Some(&idx) = self.filtered.get(self.selected) {
-            self.ensure_texture(ctx, idx);
-            self.ensure_full_text(idx);
+            if self.last_ensured != Some(idx) {
+                self.ensure_texture(ctx, idx);
+                self.ensure_full_text(idx);
+                self.last_ensured = Some(idx);
+            }
         }
 
         CentralPanel::default()
@@ -250,6 +262,18 @@ impl App {
                         let col_width = ui.available_width();
                         let mut selected_rect: Option<egui::Rect> = None;
 
+                        // Pre-compute whether selected entry needs expansion overlay
+                        let selected_needs_expand = self.filtered.get(self.selected)
+                            .map(|&idx| &self.entries[idx])
+                            .map(|e| {
+                                if e.is_image { true }
+                                else {
+                                    let full = e.full_text.as_deref().unwrap_or(&e.text);
+                                    full.contains('\n') || full.chars().count() > 80
+                                }
+                            })
+                            .unwrap_or(false);
+
                         for (i, &idx) in self.filtered.iter().enumerate() {
                             let e = &self.entries[idx];
                             let is_selected = i == self.selected;
@@ -260,7 +284,9 @@ impl App {
                             );
 
                             if is_selected {
-                                ui.painter().rect_filled(rect, 0.0, colors::BG_SELECTED);
+                                if !selected_needs_expand {
+                                    ui.painter().rect_filled(rect, 0.0, colors::BG_SELECTED);
+                                }
                                 if scroll_to_selected {
                                     ui.scroll_to_rect(rect, Some(egui::Align::Center));
                                 }
@@ -338,89 +364,82 @@ impl App {
                             }
                         }
 
-                        // Paint accordion expansion overlay (content-sized, capped)
-                        if let (Some(sel_rect), Some(&sel_idx)) = (selected_rect, self.filtered.get(self.selected)) {
-                            let e = &self.entries[sel_idx];
-                            let corner = 6.0;
-                            let max_content_h = ROW_HEIGHT * 8.0;
-                            // Text x/y must match row layout: 12px left indent, vertically centered
-                            let text_x = sel_rect.min.x + 12.0;
-                            let text_y = sel_rect.min.y + (ROW_HEIGHT - TEXT_SIZE) / 2.0;
-                            let text_w = col_width - 24.0;
-                            let pad_bottom = 10.0;
-                            let bg = egui::Color32::from_rgb(22, 22, 22);
+                        // Paint expansion overlay only when content doesn't fit one row
+                        if selected_needs_expand {
+                            if let (Some(sel_rect), Some(&sel_idx)) = (selected_rect, self.filtered.get(self.selected)) {
+                                let e = &self.entries[sel_idx];
+                                let max_content_h = ROW_HEIGHT * 8.0;
+                                let text_x = sel_rect.min.x + 12.0;
+                                let text_y = sel_rect.min.y + (ROW_HEIGHT - TEXT_SIZE) / 2.0;
+                                let text_w = col_width - 24.0;
+                                let pad_bottom = 10.0;
 
-                            // Measure natural content height
-                            let (natural_h, text_galley) = if e.is_image {
-                                let h = if let Some(tex) = &e.texture {
-                                    let ts = tex.size_vec2();
-                                    let scale = (text_w / ts.x).min(max_content_h / ts.y).min(1.0);
-                                    ts.y * scale
-                                } else { 0.0 };
-                                (h, None)
-                            } else {
-                                let display = e.full_text.as_deref().unwrap_or(&e.text);
-                                let galley = ui.painter().layout(
-                                    display.to_owned(),
-                                    FontId::new(TEXT_SIZE, FontFamily::Proportional),
-                                    colors::TEXT_PRIMARY,
-                                    text_w,
-                                );
-                                let h = galley.size().y;
-                                (h, Some(galley))
-                            };
-
-                            let content_h = natural_h.min(max_content_h);
-                            let overlay_h = (text_y - sel_rect.min.y) + content_h + pad_bottom;
-
-                            let overlay_rect = egui::Rect::from_min_size(
-                                egui::pos2(sel_rect.min.x, sel_rect.min.y),
-                                egui::vec2(col_width, overlay_h),
-                            );
-
-                            // Soft shadow below overlay
-                            for i in 0..6u8 {
-                                let alpha = 30u8.saturating_sub(i * 5);
-                                let y = overlay_rect.max.y + i as f32;
-                                ui.painter().hline(
-                                    overlay_rect.min.x..=overlay_rect.max.x,
-                                    y,
-                                    egui::Stroke::new(1.0, egui::Color32::from_black_alpha(alpha)),
-                                );
-                            }
-
-                            ui.painter().rect_filled(overlay_rect, corner, bg);
-                            // Subtle border
-                            ui.painter().rect_stroke(
-                                overlay_rect,
-                                corner,
-                                egui::Stroke::new(1.0, egui::Color32::from_white_alpha(12)),
-                                egui::StrokeKind::Inside,
-                            );
-
-                            let clip_rect = egui::Rect::from_min_max(
-                                egui::pos2(text_x, text_y),
-                                egui::pos2(text_x + text_w, overlay_rect.max.y - pad_bottom),
-                            );
-                            let painter = ui.painter().with_clip_rect(clip_rect);
-
-                            if e.is_image {
-                                if let Some(tex) = &e.texture {
-                                    let ts = tex.size_vec2();
-                                    let scale = (text_w / ts.x).min(content_h / ts.y).min(1.0);
-                                    let img_rect = egui::Rect::from_min_size(
-                                        egui::pos2(text_x, text_y),
-                                        egui::vec2(ts.x * scale, ts.y * scale),
+                                let (natural_h, text_galley) = if e.is_image {
+                                    let h = if let Some(tex) = &e.texture {
+                                        let ts = tex.size_vec2();
+                                        let scale = (text_w / ts.x).min(max_content_h / ts.y).min(1.0);
+                                        ts.y * scale
+                                    } else { 0.0 };
+                                    (h, None)
+                                } else {
+                                    let display = e.full_text.as_deref().unwrap_or(&e.text);
+                                    let galley = ui.painter().layout(
+                                        display.to_owned(),
+                                        FontId::new(TEXT_SIZE, FontFamily::Proportional),
+                                        colors::TEXT_PRIMARY,
+                                        text_w,
                                     );
-                                    painter.image(
-                                        tex.id(),
-                                        img_rect,
-                                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                                        egui::Color32::WHITE,
+                                    let h = galley.size().y;
+                                    (h, Some(galley))
+                                };
+
+                                let content_h = natural_h.min(max_content_h);
+                                let overlay_h = (text_y - sel_rect.min.y) + content_h + pad_bottom;
+
+                                let overlay_rect = egui::Rect::from_min_size(
+                                    egui::pos2(sel_rect.min.x, sel_rect.min.y),
+                                    egui::vec2(col_width, overlay_h),
+                                );
+
+                                // Soft shadow below overlay
+                                for i in 0..6u8 {
+                                    let alpha = 30u8.saturating_sub(i * 5);
+                                    let y = overlay_rect.max.y + i as f32;
+                                    ui.painter().hline(
+                                        overlay_rect.min.x..=overlay_rect.max.x,
+                                        y,
+                                        egui::Stroke::new(1.0, egui::Color32::from_black_alpha(alpha)),
                                     );
                                 }
-                            } else if let Some(galley) = text_galley {
-                                painter.galley(egui::pos2(text_x, text_y), galley, colors::TEXT_PRIMARY);
+
+                                // Opaque base matching BG_BASE over dark desktop, then BG_SELECTED on top
+                                ui.painter().rect_filled(overlay_rect, 0.0, egui::Color32::from_rgb(12, 12, 12));
+                                ui.painter().rect_filled(overlay_rect, 0.0, colors::BG_SELECTED);
+
+                                let clip_rect = egui::Rect::from_min_max(
+                                    egui::pos2(text_x, text_y),
+                                    egui::pos2(text_x + text_w, overlay_rect.max.y - pad_bottom),
+                                );
+                                let painter = ui.painter().with_clip_rect(clip_rect);
+
+                                if e.is_image {
+                                    if let Some(tex) = &e.texture {
+                                        let ts = tex.size_vec2();
+                                        let scale = (text_w / ts.x).min(content_h / ts.y).min(1.0);
+                                        let img_rect = egui::Rect::from_min_size(
+                                            egui::pos2(text_x, text_y),
+                                            egui::vec2(ts.x * scale, ts.y * scale),
+                                        );
+                                        painter.image(
+                                            tex.id(),
+                                            img_rect,
+                                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                            egui::Color32::WHITE,
+                                        );
+                                    }
+                                } else if let Some(galley) = text_galley {
+                                    painter.galley(egui::pos2(text_x, text_y), galley, colors::TEXT_PRIMARY);
+                                }
                             }
                         }
 
@@ -432,6 +451,7 @@ impl App {
 
                 common::paint_input_separator(ui, separator_y);
             });
+
     }
 }
 
@@ -457,11 +477,10 @@ impl eframe::App for App {
             self.setup_watcher(ctx);
         }
 
-        if self.needs_reload.swap(false, Ordering::SeqCst) {
-            self.load_entries(ctx);
-        }
-
         if !self.loaded {
+            self.load_entries(ctx);
+            self.needs_reload.store(false, Ordering::SeqCst);
+        } else if self.needs_reload.swap(false, Ordering::SeqCst) {
             self.load_entries(ctx);
         }
         self.scroll_momentum.update(ctx);
@@ -477,19 +496,9 @@ fn main() -> eframe::Result<()> {
 
     eframe::run_native(
         "clipboard",
-        eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default()
-                .with_inner_size([width, height])
-                .with_decorations(false)
-                .with_transparent(true)
-                .with_app_id("clipboard"),
-            ..Default::default()
-        },
+        common::window_options("clipboard", width, height),
         Box::new(|cc| {
-            let mut style = egui::Style::default();
-            style.visuals.window_fill = Color32::TRANSPARENT;
-            style.visuals.panel_fill = Color32::TRANSPARENT;
-            cc.egui_ctx.set_style(style);
+            common::setup_transparent_style(cc);
             Ok(Box::new(App::new()))
         }),
     )

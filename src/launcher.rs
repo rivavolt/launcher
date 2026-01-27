@@ -531,19 +531,9 @@ fn main() -> eframe::Result<()> {
 
     eframe::run_native(
         "launcher",
-        eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default()
-                .with_inner_size([width, height])
-                .with_decorations(false)
-                .with_transparent(true)
-                .with_app_id("launcher"),
-            ..Default::default()
-        },
+        common::window_options("launcher", width, height),
         Box::new(|cc| {
-            let mut style = egui::Style::default();
-            style.visuals.window_fill = Color32::TRANSPARENT;
-            style.visuals.panel_fill = Color32::TRANSPARENT;
-            cc.egui_ctx.set_style(style);
+            common::setup_transparent_style(cc);
             Ok(Box::new(App::new()))
         }),
     )
