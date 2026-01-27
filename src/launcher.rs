@@ -467,6 +467,11 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &Context, _: &mut eframe::Frame) {
+        if ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.should_hide = true;
+        }
+
         if self._hypr_thread.is_none() {
             self.setup_hyprland_events(ctx);
         }

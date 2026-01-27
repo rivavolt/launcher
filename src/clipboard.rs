@@ -318,6 +318,11 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &Context, _: &mut eframe::Frame) {
         use std::sync::atomic::Ordering;
 
+        if ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.should_hide = true;
+        }
+
         if self._watcher.is_none() {
             self.setup_watcher(ctx);
         }
