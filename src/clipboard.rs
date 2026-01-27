@@ -1,6 +1,6 @@
 //! Clipboard manager using eframe (regular window in special workspace)
 
-use launcher::common::{colors, handle_navigation_keys, truncate};
+use launcher::common::{colors, handle_navigation_keys, truncate, ScrollMomentum};
 use launcher::common::{INPUT_PADDING, INPUT_SIZE, ROW_HEIGHT, TEXT_SIZE};
 use launcher::hyprland;
 use eframe::egui::{self, CentralPanel, Context, Frame, Color32, RichText, ScrollArea, FontFamily, FontId, Ui};
@@ -31,6 +31,7 @@ struct App {
     held_key: Option<(egui::Key, std::time::Instant)>,
     needs_reload: std::sync::Arc<std::sync::atomic::AtomicBool>,
     _watcher: Option<RecommendedWatcher>,
+    scroll_momentum: ScrollMomentum,
 }
 
 impl App {
@@ -49,6 +50,7 @@ impl App {
             held_key: None,
             needs_reload: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             _watcher: None,
+            scroll_momentum: ScrollMomentum::new(),
         }
     }
 
@@ -326,6 +328,7 @@ impl eframe::App for App {
         if !self.loaded {
             self.load_entries(ctx);
         }
+        self.scroll_momentum.update(ctx);
         self.render(ctx);
         if self.should_hide {
             self.hide_and_reset();

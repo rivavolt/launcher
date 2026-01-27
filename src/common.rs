@@ -125,7 +125,7 @@ pub fn handle_navigation_keys(
         let elapsed_ms = now.duration_since(start_time).as_millis();
         if elapsed_ms > REPEAT_DELAY_MS {
             let repeat_count = (elapsed_ms - REPEAT_DELAY_MS) / REPEAT_INTERVAL_MS;
-            let last_repeat = (elapsed_ms - REPEAT_DELAY_MS - REPEAT_INTERVAL_MS) / REPEAT_INTERVAL_MS;
+            let last_repeat = (elapsed_ms - REPEAT_DELAY_MS).saturating_sub(REPEAT_INTERVAL_MS) / REPEAT_INTERVAL_MS;
             if repeat_count > last_repeat || elapsed_ms < REPEAT_DELAY_MS + REPEAT_INTERVAL_MS {
                 match key {
                     egui::Key::ArrowDown => down = true,
@@ -138,6 +138,54 @@ pub fn handle_navigation_keys(
     }
 
     (down, up)
+}
+
+/// Kinetic scroll momentum for touchpad scrolling.
+/// Uses exponential velocity decay matching Firefox/iOS (rate=0.998/ms).
+pub struct ScrollMomentum {
+    velocity: f32,
+    last_input: std::time::Instant,
+    prev_frame: std::time::Instant,
+}
+
+const DECAY_PER_MS: f32 = 0.998;
+const STOP_VELOCITY: f32 = 10.0; // px/s (Firefox: 0.01 px/ms)
+
+impl ScrollMomentum {
+    pub fn new() -> Self {
+        let now = std::time::Instant::now();
+        Self { velocity: 0.0, last_input: now, prev_frame: now }
+    }
+
+    /// Call each frame before any ScrollArea is shown.
+    pub fn update(&mut self, ctx: &egui::Context) {
+        let now = std::time::Instant::now();
+        let dt = now.duration_since(self.prev_frame).as_secs_f32().max(0.001);
+        self.prev_frame = now;
+
+        let raw = ctx.input(|i| i.raw_scroll_delta.y);
+
+        if raw.abs() > 0.5 {
+            self.velocity = self.velocity * 0.5 + (raw / dt) * 0.5;
+            self.last_input = now;
+            return;
+        }
+
+        if self.velocity.abs() < STOP_VELOCITY {
+            self.velocity = 0.0;
+            return;
+        }
+
+        // Exponential decay: v *= 0.998^(dt_ms)
+        self.velocity *= DECAY_PER_MS.powf(dt * 1000.0);
+
+        if self.velocity.abs() < STOP_VELOCITY {
+            self.velocity = 0.0;
+        } else {
+            ctx.input_mut(|i| i.smooth_scroll_delta.y = self.velocity * dt);
+            ctx.request_repaint();
+        }
+    }
 }
 
 /// Truncate string to max characters with ellipsis

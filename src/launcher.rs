@@ -1,7 +1,7 @@
 //! App launcher using eframe (regular window in special workspace)
 
 use eframe::egui::{self, CentralPanel, Context, Frame, Color32, RichText, ScrollArea, Sense, Ui, FontFamily, FontId, Stroke};
-use launcher::common::{colors, handle_navigation_keys, TEXT_SIZE, INPUT_SIZE, INPUT_PADDING};
+use launcher::common::{colors, handle_navigation_keys, ScrollMomentum, TEXT_SIZE, INPUT_SIZE, INPUT_PADDING};
 use launcher::{desktop, hyprland};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
@@ -119,6 +119,7 @@ struct App {
     matcher: Matcher,
     needs_reload: Arc<AtomicBool>,
     _hypr_thread: Option<std::thread::JoinHandle<()>>,
+    scroll_momentum: ScrollMomentum,
 }
 
 impl App {
@@ -135,6 +136,7 @@ impl App {
             matcher: Matcher::new(Config::DEFAULT),
             needs_reload: Arc::new(AtomicBool::new(false)),
             _hypr_thread: None,
+            scroll_momentum: ScrollMomentum::new(),
         }
     }
 
@@ -474,6 +476,7 @@ impl eframe::App for App {
         if !self.loaded {
             self.load_entries(ctx);
         }
+        self.scroll_momentum.update(ctx);
         self.render(ctx);
         if self.should_hide {
             self.hide_and_reset();
