@@ -36,11 +36,15 @@ struct App {
     _watcher: Option<RecommendedWatcher>,
     scroll_momentum: ScrollMomentum,
     last_ensured: Option<usize>,
+    max_size: (f32, f32),
+    last_height: f32,
 }
 
 impl App {
     fn new() -> Self {
         let re = Regex::new(r"\[\[\s*binary data\s+[\d.]+\s*\w+\s+(\w+)\s+(\d+)x(\d+)\s*\]\]").unwrap();
+        let eframe_size = hyprland::window_size(0.382, 0.618, (300.0, 400.0));
+        let max_size = (eframe_size.0 * 2.0, eframe_size.1 * 2.0);
 
         Self {
             query: String::new(),
@@ -57,6 +61,8 @@ impl App {
             _watcher: None,
             scroll_momentum: ScrollMomentum::new(),
             last_ensured: None,
+            max_size,
+            last_height: 0.0,
         }
     }
 
@@ -229,7 +235,7 @@ impl App {
         CentralPanel::default()
             .frame(common::panel_frame())
             .show(ctx, |ui: &mut Ui| {
-                let screen = ui.available_rect_before_wrap();
+                let _screen = ui.available_rect_before_wrap();
                 let font_id = FontId::new(INPUT_SIZE, FontFamily::Proportional);
 
                 common::input_frame().show(ui, |ui: &mut Ui| {
@@ -241,13 +247,38 @@ impl App {
                         .frame(false)
                         .desired_width(ui.available_width());
                     let r = ui.add(input);
-                    if ui.ctx().input(|i| i.focused) { r.request_focus(); }
+                    if ui.ctx().input(|i| i.focused) {
+                        r.request_focus();
+                    } else {
+                        r.surrender_focus();
+                    }
                     if self.query != old_query { self.filter(); }
                 });
 
                 let separator_y = ui.cursor().min.y;
 
-                let list_height = screen.max.y - ui.cursor().min.y;
+                let header_height = ui.cursor().min.y;
+                let max_visible = 12;
+                let num_items = self.filtered.len().min(max_visible);
+                let spacing_y = ui.spacing().item_spacing.y;
+                let items_height = if num_items > 0 {
+                    num_items as f32 * ROW_HEIGHT + (num_items - 1) as f32 * spacing_y
+                } else {
+                    0.0
+                };
+                let desired_height = header_height + items_height;
+                let target_height = desired_height.min(self.max_size.1);
+                if (target_height - self.last_height).abs() > 1.0 {
+                    self.last_height = target_height;
+                    let w = self.max_size.0 as i32;
+                    let h = target_height as i32;
+                    hyprland::dispatch_async(
+                        "resizewindowpixel",
+                        &format!("exact {} {},class:clipboard", w, h),
+                    );
+                }
+
+                let list_height = (self.max_size.1 - header_height).max(ROW_HEIGHT);
                 let scroll_to_selected = down || up;
 
                 ScrollArea::vertical()
@@ -466,11 +497,6 @@ impl eframe::App for App {
         if ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.should_hide = true;
-        }
-
-        if !ctx.input(|i| i.focused) {
-            CentralPanel::default().frame(common::panel_frame()).show(ctx, |_| {});
-            return;
         }
 
         if self._watcher.is_none() {

@@ -122,6 +122,10 @@ struct App {
     scroll_momentum: ScrollMomentum,
     max_size: (f32, f32),
     last_height: f32,
+    // Caches
+    ghost_text_cache: String,
+    display_names: HashMap<usize, String>,
+    last_content_width: f32,
 }
 
 impl App {
@@ -144,6 +148,9 @@ impl App {
             scroll_momentum: ScrollMomentum::new(),
             max_size,
             last_height: 0.0,
+            ghost_text_cache: String::new(),
+            display_names: HashMap::new(),
+            last_content_width: 0.0,
         }
     }
 
@@ -152,13 +159,12 @@ impl App {
         let ctx = ctx.clone();
 
         self._hypr_thread = hyprland::subscribe_events(move |line| {
-            if line.starts_with("openwindow>>")
-                || line.starts_with("closewindow>>")
-                || line.starts_with("windowtitle>>")
-                || line.starts_with("movewindow>>")
-            {
+            if line.starts_with("openwindow>>") || line.starts_with("closewindow>>") {
                 needs_reload.store(true, Ordering::SeqCst);
                 ctx.request_repaint();
+            } else if line.starts_with("windowtitle>>") || line.starts_with("movewindow>>") {
+                // Mark for reload but don't repaint - will refresh when focused
+                needs_reload.store(true, Ordering::SeqCst);
             }
         });
     }
@@ -228,21 +234,23 @@ impl App {
             self.filtered = scored.into_iter().map(|(_, idx)| idx).take(50).collect();
         }
         self.selected = 0;
+        self.display_names.clear(); // Invalidate truncation cache
+        self.update_ghost_text();
     }
 
-    fn ghost_text(&self) -> String {
+    fn update_ghost_text(&mut self) {
+        self.ghost_text_cache.clear();
         if self.query.is_empty() {
-            return String::new();
+            return;
         }
         if let Some(&idx) = self.filtered.first() {
             let name = self.entries[idx].name();
             let name_lower = name.to_lowercase();
             let query_lower = self.query.to_lowercase();
             if name_lower.starts_with(&query_lower) {
-                return name.chars().skip(self.query.chars().count()).collect();
+                self.ghost_text_cache = name.chars().skip(self.query.chars().count()).collect();
             }
         }
-        String::new()
     }
 
     fn activate(&mut self) {
@@ -325,30 +333,33 @@ impl App {
                 let screen = ui.available_rect_before_wrap();
                 let content_width = screen.width();
 
-                let font_id = FontId::new(INPUT_SIZE, FontFamily::Proportional);
-                let ghost = self.ghost_text();
+                let input_font = FontId::new(INPUT_SIZE, FontFamily::Proportional);
 
                 common::input_frame().show(ui, |ui: &mut Ui| {
                     let old_query = self.query.clone();
                     let input = egui::TextEdit::singleline(&mut self.query)
-                        .font(font_id.clone())
+                        .font(input_font.clone())
                         .text_color(colors::TEXT_PRIMARY)
                         .hint_text(RichText::new("Search...").color(colors::TEXT_MUTED))
                         .frame(false)
                         .desired_width(ui.available_width());
                     let output = input.show(ui);
-                    if ui.ctx().input(|i| i.focused) { output.response.request_focus(); }
+                    if ui.ctx().input(|i| i.focused) {
+                        output.response.request_focus();
+                    } else {
+                        output.response.surrender_focus();
+                    }
                     if self.query != old_query { self.filter(); }
 
-                    if !ghost.is_empty() && !self.query.is_empty() {
+                    if !self.ghost_text_cache.is_empty() && !self.query.is_empty() {
                         let mut job = egui::text::LayoutJob::default();
                         job.append(&self.query, 0.0, egui::TextFormat {
-                            font_id: font_id.clone(),
+                            font_id: input_font.clone(),
                             color: Color32::TRANSPARENT,
                             ..Default::default()
                         });
-                        job.append(&ghost, 0.0, egui::TextFormat {
-                            font_id,
+                        job.append(&self.ghost_text_cache, 0.0, egui::TextFormat {
+                            font_id: input_font,
                             color: colors::GHOST_TEXT,
                             ..Default::default()
                         });
@@ -384,6 +395,24 @@ impl App {
                 let mut clicked = None;
                 let visible_height = (self.max_size.1 - header_height).max(row_height);
                 let scroll_to_selected = down || up;
+
+                // Pre-computed fonts (avoid allocation per row)
+                let text_font = FontId::new(TEXT_SIZE, FontFamily::Proportional);
+                let ws_font = FontId::new(TEXT_SIZE * 0.85, FontFamily::Proportional);
+                let text_x = ROW_PADDING + ICON_CONTAINER + ICON_LABEL_SPACING;
+
+                // Cache display names if width changed or cache is empty
+                if (self.last_content_width - content_width).abs() > 1.0 || self.display_names.is_empty() {
+                    self.last_content_width = content_width;
+                    self.display_names.clear();
+                    for &idx in &self.filtered {
+                        let e = &self.entries[idx];
+                        let right_margin = if e.is_window() { ICON_CONTAINER + ROW_PADDING * 2.0 } else { ROW_PADDING };
+                        let available_width = content_width - text_x - right_margin;
+                        let display_name = truncate_to_width(ui, e.name(), text_font.clone(), available_width);
+                        self.display_names.insert(idx, display_name);
+                    }
+                }
 
                 ScrollArea::vertical()
                     .max_height(visible_height)
@@ -445,19 +474,13 @@ impl App {
                             );
                         }
 
-                        let text_x = ROW_PADDING + ICON_CONTAINER + ICON_LABEL_SPACING;
                         let text_y = row_y + (row_height - TEXT_SIZE) / 2.0;
-                        let text_font = FontId::new(TEXT_SIZE, FontFamily::Proportional);
-
-                        let right_margin = if e.is_window() { ICON_CONTAINER + ROW_PADDING * 2.0 } else { ROW_PADDING };
-                        let available_width = content_width - text_x - right_margin;
-
-                        let display_name = truncate_to_width(ui, e.name(), text_font.clone(), available_width);
+                        let display_name = self.display_names.get(&idx).map(|s| s.as_str()).unwrap_or(e.name());
                         ui.painter().text(
                             egui::pos2(text_x, text_y),
                             egui::Align2::LEFT_TOP,
-                            &display_name,
-                            text_font,
+                            display_name,
+                            text_font.clone(),
                             text_color,
                         );
 
@@ -470,7 +493,7 @@ impl App {
                                 ws_center,
                                 egui::Align2::CENTER_CENTER,
                                 ws,
-                                FontId::new(TEXT_SIZE * 0.85, FontFamily::Proportional),
+                                ws_font.clone(),
                                 colors::TEXT_MUTED,
                             );
                         }
@@ -502,13 +525,14 @@ impl eframe::App for App {
             self.should_hide = true;
         }
 
-        if !ctx.input(|i| i.focused) {
-            CentralPanel::default().frame(common::panel_frame()).show(ctx, |_| {});
-            return;
-        }
-
         if self._hypr_thread.is_none() {
             self.setup_hyprland_events(ctx);
+        }
+
+        // Render content when unfocused but skip input processing
+        if !ctx.input(|i| i.focused) {
+            self.render(ctx);
+            return;
         }
 
         if self.needs_reload.swap(false, Ordering::SeqCst) {
