@@ -100,7 +100,6 @@
               description = "Launcher (eframe)";
               wantedBy = [ "hyprland-session.target" ];
               partOf = [ "hyprland-session.target" ];
-              after = [ "hyprland-session.target" ];
               path = lib.mkForce [];
               environment = {
                 GIO_EXTRA_MODULES = "${pkgs.dconf.lib}/lib/gio/modules:${pkgs.glib-networking}/lib/gio/modules";
@@ -117,7 +116,6 @@
               description = "Clipboard (eframe)";
               wantedBy = [ "hyprland-session.target" ];
               partOf = [ "hyprland-session.target" ];
-              after = [ "hyprland-session.target" ];
               path = [ pkgs.hyprland pkgs.cliphist pkgs.wl-clipboard ];
               serviceConfig = {
                 ExecStart = "${launcherPkg}/bin/clipboard";

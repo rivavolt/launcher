@@ -20,6 +20,7 @@ struct Entry {
     is_image: bool,
     dims: Option<(u32, u32)>,
     texture: Option<egui::TextureHandle>,
+    thumb: Option<egui::TextureHandle>,
 }
 
 struct App {
@@ -129,9 +130,10 @@ impl App {
         if e.is_image && e.texture.is_none() && !self.failed_textures.contains(&idx) {
             if let Some(caps) = self.re.captures(&e.id) {
                 let fmt = caps.get(1).map(|m| m.as_str().to_lowercase()).unwrap_or("png".into());
-                if let Some(tex) = decode_image(ctx, &e.id, &fmt) {
+                if let Some((tex, thumb)) = decode_image(ctx, &e.id, &fmt) {
                     self.textures.insert(e.id.clone(), tex.clone());
                     self.entries[idx].texture = Some(tex);
+                    self.entries[idx].thumb = Some(thumb);
                 } else {
                     self.failed_textures.insert(idx);
                 }
@@ -314,13 +316,14 @@ impl App {
                 let filtered = &self.filtered;
                 let entries = &self.entries;
 
-                let deleting = self.deleting;
                 let vl_output = ScrollArea::vertical()
                     .id_salt("clip_list")
                     .max_height(list_height)
                     .show(ui, |ui: &mut Ui| {
+
                         let col_width = ui.available_width();
 
+                        let deleting = self.deleting;
                         let vl = virtual_list(
                             ui,
                             filtered.len(),
@@ -355,7 +358,8 @@ impl App {
                                 let rx = rect.min.x + x_offset;
 
                                 if e.is_image {
-                                    if let Some(tex) = &e.texture {
+                                    let row_tex = e.thumb.as_ref().or(e.texture.as_ref());
+                                    if let Some(tex) = row_tex {
                                         let tex_size = tex.size_vec2();
                                         let thumb_h = ROW_HEIGHT - 4.0;
                                         let thumb_w = thumb_h * (tex_size.x / tex_size.y);
@@ -574,20 +578,22 @@ fn collect(ctx: &Context, re: &Regex, textures: &mut HashMap<String, egui::Textu
             let w = caps.get(2).and_then(|m| m.as_str().parse().ok());
             let h = caps.get(3).and_then(|m| m.as_str().parse().ok());
 
-            let texture = if i < 20 {
-                textures.get(line).cloned().or_else(|| {
-                    decode_image(ctx, line, &fmt.clone().unwrap_or("png".into())).map(|t: egui::TextureHandle| {
-                        textures.insert(line.to_string(), t.clone());
-                        t
-                    })
-                })
-            } else { None };
+            let (texture, thumb) = if i < 20 {
+                if let Some(tex) = textures.get(line).cloned() {
+                    (Some(tex), None)
+                } else if let Some((tex, th)) = decode_image(ctx, line, &fmt.clone().unwrap_or("png".into())) {
+                    textures.insert(line.to_string(), tex.clone());
+                    (Some(tex), Some(th))
+                } else {
+                    (None, None)
+                }
+            } else { (None, None) };
 
-            entries.push(Entry { id: line.into(), text: "[image]".into(), full_text: None, is_image: true, dims: w.zip(h), texture });
+            entries.push(Entry { id: line.into(), text: "[image]".into(), full_text: None, is_image: true, dims: w.zip(h), texture, thumb });
         } else {
             let text = line.split_once('\t').map(|(_, t)| t).unwrap_or(line).to_string();
             if !seen.insert(text.clone()) { continue; }
-            entries.push(Entry { id: line.into(), text, full_text: None, is_image: false, dims: None, texture: None });
+            entries.push(Entry { id: line.into(), text, full_text: None, is_image: false, dims: None, texture: None, thumb: None });
         }
     }
     entries
@@ -599,7 +605,7 @@ fn id_hash(id: &str) -> u64 {
     h.finish()
 }
 
-fn decode_image(ctx: &Context, id: &str, ext: &str) -> Option<egui::TextureHandle> {
+fn decode_image(ctx: &Context, id: &str, ext: &str) -> Option<(egui::TextureHandle, egui::TextureHandle)> {
     let hash = id_hash(id);
     let path = temp_dir().join(format!("img_{:x}.{}", hash, ext));
 
@@ -612,11 +618,25 @@ fn decode_image(ctx: &Context, id: &str, ext: &str) -> Option<egui::TextureHandl
     }
 
     let data = std::fs::read(&path).ok()?;
-    let img = image::load_from_memory(&data).ok()?.to_rgba8();
-    let size = [img.width() as usize, img.height() as usize];
-    Some(ctx.load_texture(
+    let img = image::load_from_memory(&data).ok()?;
+
+    // Full-resolution texture for preview overlay
+    let full = img.to_rgba8();
+    let full_size = [full.width() as usize, full.height() as usize];
+    let tex = ctx.load_texture(
         format!("clip_{:x}", hash),
-        egui::ColorImage::from_rgba_unmultiplied(size, &img.into_raw()),
+        egui::ColorImage::from_rgba_unmultiplied(full_size, &full.into_raw()),
         egui::TextureOptions::LINEAR,
-    ))
+    );
+
+    // CPU-downscaled thumbnail for list rows
+    let thumb_img = img.resize(128, 128, image::imageops::FilterType::CatmullRom).to_rgba8();
+    let thumb_size = [thumb_img.width() as usize, thumb_img.height() as usize];
+    let thumb = ctx.load_texture(
+        format!("clip_{:x}_thumb", hash),
+        egui::ColorImage::from_rgba_unmultiplied(thumb_size, &thumb_img.into_raw()),
+        egui::TextureOptions::LINEAR,
+    );
+
+    Some((tex, thumb))
 }
