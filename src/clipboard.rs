@@ -39,6 +39,7 @@ struct App {
     last_ensured: Option<usize>,
     max_size: (f32, f32),
     last_height: f32,
+    deleting: Option<(usize, std::time::Instant)>,
 }
 
 impl App {
@@ -64,6 +65,7 @@ impl App {
             last_ensured: None,
             max_size,
             last_height: 0.0,
+            deleting: None,
         }
     }
 
@@ -220,10 +222,26 @@ impl App {
             }
         });
 
+        // Complete delete animation
+        if let Some((_, t)) = self.deleting {
+            let elapsed = t.elapsed().as_secs_f32();
+            if elapsed >= 0.15 {
+                let sel = self.selected;
+                self.deleting = None;
+                self.delete(ctx);
+                self.selected = sel.min(self.filtered.len().saturating_sub(1));
+            } else {
+                ctx.request_repaint();
+            }
+        }
+
         if down { self.selected = (self.selected + 1).min(max_sel); }
         if up { self.selected = self.selected.saturating_sub(1); }
         if activate { self.activate(); return; }
-        if delete { self.delete(ctx); }
+        if delete && self.deleting.is_none() {
+            self.deleting = Some((self.selected, std::time::Instant::now()));
+            ctx.request_repaint();
+        }
 
         // Ensure texture + full text for selected entry (skip if unchanged)
         if let Some(&idx) = self.filtered.get(self.selected) {
@@ -296,6 +314,7 @@ impl App {
                 let filtered = &self.filtered;
                 let entries = &self.entries;
 
+                let deleting = self.deleting;
                 let vl_output = ScrollArea::vertical()
                     .id_salt("clip_list")
                     .max_height(list_height)
@@ -313,11 +332,27 @@ impl App {
                                 let idx = filtered[i];
                                 let e = &entries[idx];
                                 let is_selected = i == self.selected;
+
+                                // Fade + slide animation for deleting row
+                                let (alpha, x_offset) = if let Some((del_i, t)) = deleting {
+                                    if i == del_i {
+                                        let progress = (t.elapsed().as_secs_f32() / 0.15).min(1.0);
+                                        let alpha = ((1.0 - progress) * 255.0) as u8;
+                                        let x_offset = -progress * 40.0;
+                                        (alpha, x_offset)
+                                    } else { (255, 0.0) }
+                                } else { (255, 0.0) };
+
                                 let text_color = if is_selected {
                                     colors::TEXT_PRIMARY
                                 } else {
                                     colors::TEXT_SECONDARY
                                 };
+                                let text_color = egui::Color32::from_rgba_unmultiplied(
+                                    text_color.r(), text_color.g(), text_color.b(), alpha,
+                                );
+
+                                let rx = rect.min.x + x_offset;
 
                                 if e.is_image {
                                     if let Some(tex) = &e.texture {
@@ -325,20 +360,21 @@ impl App {
                                         let thumb_h = ROW_HEIGHT - 4.0;
                                         let thumb_w = thumb_h * (tex_size.x / tex_size.y);
                                         let thumb_rect = egui::Rect::from_min_size(
-                                            egui::pos2(rect.min.x + 8.0, rect.min.y + 2.0),
+                                            egui::pos2(rx + 8.0, rect.min.y + 2.0),
                                             egui::vec2(thumb_w, thumb_h),
                                         );
+                                        let tint = egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
                                         ui.painter().image(
                                             tex.id(),
                                             thumb_rect,
                                             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                                            egui::Color32::WHITE,
+                                            tint,
                                         );
 
                                         let display_text = e.dims.map(|(w, h)| format!("{}x{}", w, h))
                                             .unwrap_or_else(|| "image".into());
                                         let text_pos = egui::pos2(
-                                            rect.min.x + 8.0 + thumb_w + 8.0,
+                                            rx + 8.0 + thumb_w + 8.0,
                                             rect.min.y + (ROW_HEIGHT - TEXT_SIZE) / 2.0,
                                         );
                                         ui.painter().text(
@@ -352,7 +388,7 @@ impl App {
                                         let display_text = e.dims.map(|(w, h)| format!("[img {}x{}]", w, h))
                                             .unwrap_or_else(|| "[image]".into());
                                         let text_pos = egui::pos2(
-                                            rect.min.x + 12.0,
+                                            rx + 12.0,
                                             rect.min.y + (ROW_HEIGHT - TEXT_SIZE) / 2.0,
                                         );
                                         ui.painter().text(
@@ -366,7 +402,7 @@ impl App {
                                 } else {
                                     let display_text = truncate(&e.text, 80);
                                     let text_pos = egui::pos2(
-                                        rect.min.x + 12.0,
+                                        rx + 12.0,
                                         rect.min.y + (ROW_HEIGHT - TEXT_SIZE) / 2.0,
                                     );
                                     ui.painter().text(
