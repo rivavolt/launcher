@@ -15,8 +15,8 @@ use std::{env, fs};
 use strsim::jaro_winkler;
 
 // Launcher-specific layout
-const ICON_SIZE: f32 = 20.0;
-const ICON_CONTAINER: f32 = 24.0;
+const ICON_SIZE: f32 = TEXT_SIZE;
+const ICON_CONTAINER: f32 = TEXT_SIZE + 4.0;
 const ROW_PADDING: f32 = 4.0;
 const ICON_LABEL_SPACING: f32 = 8.0;
 const MAX_VISIBLE_ITEMS: usize = 15;
