@@ -66,7 +66,11 @@ pub fn dispatch(cmd: &str, arg: &str) {
 
 /// Run hyprctl dispatch (non-blocking)
 pub fn dispatch_async(cmd: &str, arg: &str) {
-    let _ = Command::new("hyprctl").args(["dispatch", cmd, arg]).spawn();
+    let cmd = cmd.to_owned();
+    let arg = arg.to_owned();
+    thread::spawn(move || {
+        let _ = Command::new("hyprctl").args(["dispatch", &cmd, &arg]).output();
+    });
 }
 
 /// Subscribe to Hyprland IPC event socket.
