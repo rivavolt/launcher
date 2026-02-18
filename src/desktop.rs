@@ -25,7 +25,7 @@ impl Icon {
     pub fn resolve(&self, icon_index: &HashMap<String, PathBuf>) -> Option<PathBuf> {
         match self {
             Icon::Path(p) if p.exists() => Some(p.clone()),
-            Icon::Name(name) => icon_index.get(name).cloned(),
+            Icon::Name(name) => icon_index.get(&name.to_lowercase()).cloned(),
             _ => None,
         }
     }
@@ -237,7 +237,7 @@ pub fn build_icon_index() -> HashMap<String, PathBuf> {
                         for e in entries.flatten() {
                             let path = e.path();
                             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                                index.entry(stem.to_string()).or_insert(path);
+                                index.entry(stem.to_lowercase()).or_insert(path);
                             }
                         }
                     }
@@ -251,7 +251,7 @@ pub fn build_icon_index() -> HashMap<String, PathBuf> {
             for e in entries.flatten() {
                 let path = e.path();
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    index.entry(stem.to_string()).or_insert(path);
+                    index.entry(stem.to_lowercase()).or_insert(path);
                 }
             }
         }
