@@ -1,14 +1,30 @@
 //! Shared constants and utilities for launcher and clipboard
 
 use eframe::egui::{self, Frame, Sense, Ui, Rect};
+use std::sync::OnceLock;
 
-// Layout constants - golden ratio based
 pub const GOLDEN: f32 = 1.618;
-pub const TEXT_SIZE: f32 = 16.0;
-pub const INPUT_SIZE: f32 = TEXT_SIZE * GOLDEN;
-pub const INPUT_PADDING: f32 = 8.0 * GOLDEN;
-pub const ROW_HEIGHT: f32 = 36.0;
 pub const MAX_VISIBLE_ITEMS: usize = 12;
+
+pub fn text_size() -> f32 {
+    static V: OnceLock<f32> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("LAUNCHER_FONT_SIZE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(16.0)
+    })
+}
+
+pub fn font_family() -> &'static str {
+    static V: OnceLock<String> = OnceLock::new();
+    V.get_or_init(|| {
+        std::env::var("LAUNCHER_FONT_FAMILY").unwrap_or_else(|_| "Inter".into())
+    })
+}
+
+pub fn input_size() -> f32 { text_size() * GOLDEN }
+pub fn row_height() -> f32 { (text_size() * 2.25).round() }
 
 // Key repeat timing
 pub const REPEAT_DELAY_MS: u128 = 300;
@@ -249,8 +265,7 @@ pub fn setup_transparent_style(cc: &eframe::CreationContext) {
     style.spacing.scroll.bar_width = 8.0;
     cc.egui_ctx.set_style(style);
 
-    // Load Inter font if available, otherwise fall back to egui default
-    if let Some(font_path) = find_font("Inter") {
+    if let Some(font_path) = find_font(font_family()) {
         if let Ok(font_data) = std::fs::read(&font_path) {
             let mut fonts = egui::FontDefinitions::default();
             fonts.font_data.insert(

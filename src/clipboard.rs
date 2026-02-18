@@ -2,7 +2,6 @@
 
 use launcher::common::{self, colors, handle_navigation_keys, truncate, virtual_list};
 use launcher::scroll::ScrollMomentum;
-use launcher::common::{INPUT_SIZE, ROW_HEIGHT, TEXT_SIZE};
 use launcher::hyprland;
 use eframe::egui::{self, CentralPanel, Context, RichText, ScrollArea, FontFamily, FontId, Ui};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
@@ -257,7 +256,7 @@ impl App {
         let input_response = egui::TopBottomPanel::top("input")
             .frame(common::input_frame())
             .show(ctx, |ui: &mut Ui| {
-                let font_id = FontId::new(INPUT_SIZE, FontFamily::Proportional);
+                let font_id = FontId::new(common::input_size(), FontFamily::Proportional);
                 let old_query = self.query.clone();
                 let input = egui::TextEdit::singleline(&mut self.query)
                     .font(font_id)
@@ -282,7 +281,7 @@ impl App {
                 let num_items = self.filtered.len().min(max_visible);
                 let spacing_y = ui.spacing().item_spacing.y;
                 let items_height = if num_items > 0 {
-                    num_items as f32 * ROW_HEIGHT + (num_items - 1) as f32 * spacing_y
+                    num_items as f32 * common::row_height() + (num_items - 1) as f32 * spacing_y
                 } else {
                     0.0
                 };
@@ -298,7 +297,7 @@ impl App {
                     );
                 }
 
-                let list_height = (self.max_size.1 - header_height).max(ROW_HEIGHT);
+                let list_height = (self.max_size.1 - header_height).max(common::row_height());
                 let scroll_to_selected = down || up;
 
                 // Pre-compute whether selected entry needs expansion overlay
@@ -327,7 +326,7 @@ impl App {
                         let vl = virtual_list(
                             ui,
                             filtered.len(),
-                            ROW_HEIGHT,
+                            common::row_height(),
                             self.selected,
                             scroll_to_selected,
                             selected_needs_expand,
@@ -361,7 +360,7 @@ impl App {
                                     let row_tex = e.thumb.as_ref().or(e.texture.as_ref());
                                     if let Some(tex) = row_tex {
                                         let tex_size = tex.size_vec2();
-                                        let thumb_h = ROW_HEIGHT - 4.0;
+                                        let thumb_h = common::row_height() - 4.0;
                                         let thumb_w = thumb_h * (tex_size.x / tex_size.y);
                                         let thumb_rect = egui::Rect::from_min_size(
                                             egui::pos2(rx + 8.0, rect.min.y + 2.0),
@@ -379,13 +378,13 @@ impl App {
                                             .unwrap_or_else(|| "image".into());
                                         let text_pos = egui::pos2(
                                             rx + 8.0 + thumb_w + 8.0,
-                                            rect.min.y + (ROW_HEIGHT - TEXT_SIZE) / 2.0,
+                                            rect.min.y + (common::row_height() - common::text_size()) / 2.0,
                                         );
                                         ui.painter().text(
                                             text_pos,
                                             egui::Align2::LEFT_TOP,
                                             &display_text,
-                                            FontId::new(TEXT_SIZE, FontFamily::Proportional),
+                                            FontId::new(common::text_size(), FontFamily::Proportional),
                                             text_color,
                                         );
                                     } else {
@@ -393,13 +392,13 @@ impl App {
                                             .unwrap_or_else(|| "[image]".into());
                                         let text_pos = egui::pos2(
                                             rx + 12.0,
-                                            rect.min.y + (ROW_HEIGHT - TEXT_SIZE) / 2.0,
+                                            rect.min.y + (common::row_height() - common::text_size()) / 2.0,
                                         );
                                         ui.painter().text(
                                             text_pos,
                                             egui::Align2::LEFT_TOP,
                                             &display_text,
-                                            FontId::new(TEXT_SIZE, FontFamily::Proportional),
+                                            FontId::new(common::text_size(), FontFamily::Proportional),
                                             text_color,
                                         );
                                     }
@@ -407,13 +406,13 @@ impl App {
                                     let display_text = truncate(&e.text, 80);
                                     let text_pos = egui::pos2(
                                         rx + 12.0,
-                                        rect.min.y + (ROW_HEIGHT - TEXT_SIZE) / 2.0,
+                                        rect.min.y + (common::row_height() - common::text_size()) / 2.0,
                                     );
                                     ui.painter().text(
                                         text_pos,
                                         egui::Align2::LEFT_TOP,
                                         &display_text,
-                                        FontId::new(TEXT_SIZE, FontFamily::Proportional),
+                                        FontId::new(common::text_size(), FontFamily::Proportional),
                                         text_color,
                                     );
                                 }
@@ -424,9 +423,9 @@ impl App {
                         if selected_needs_expand {
                             if let (Some(sel_rect), Some(&sel_idx)) = (vl.selected_rect, filtered.get(self.selected)) {
                                 let e = &entries[sel_idx];
-                                let max_content_h = ROW_HEIGHT * 8.0;
+                                let max_content_h = common::row_height() * 8.0;
                                 let text_x = sel_rect.min.x + 12.0;
-                                let text_y = sel_rect.min.y + (ROW_HEIGHT - TEXT_SIZE) / 2.0;
+                                let text_y = sel_rect.min.y + (common::row_height() - common::text_size()) / 2.0;
                                 let text_w = col_width - 24.0;
                                 let pad_bottom = 10.0;
 
@@ -441,7 +440,7 @@ impl App {
                                     let display = e.full_text.as_deref().unwrap_or(&e.text);
                                     let galley = ui.painter().layout(
                                         display.to_owned(),
-                                        FontId::new(TEXT_SIZE, FontFamily::Proportional),
+                                        FontId::new(common::text_size(), FontFamily::Proportional),
                                         colors::TEXT_PRIMARY,
                                         text_w,
                                     );

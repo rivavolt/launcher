@@ -1,7 +1,7 @@
 //! App launcher using eframe (regular window in special workspace)
 
 use eframe::egui::{self, CentralPanel, Context, Color32, RichText, ScrollArea, Ui, FontFamily, FontId};
-use launcher::common::{self, colors, handle_navigation_keys, virtual_list, TEXT_SIZE, INPUT_SIZE};
+use launcher::common::{self, colors, handle_navigation_keys, virtual_list};
 use launcher::scroll::ScrollMomentum;
 use launcher::{desktop, hyprland};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
@@ -14,12 +14,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::{env, fs};
 use strsim::jaro_winkler;
 
-// Launcher-specific layout
-const ICON_SIZE: f32 = TEXT_SIZE;
-const ICON_CONTAINER: f32 = TEXT_SIZE + 4.0;
-const ROW_PADDING: f32 = 6.0;
-const ICON_LABEL_SPACING: f32 = 10.0;
 const MAX_VISIBLE_ITEMS: usize = 15;
+
+fn icon_size() -> f32 { (common::text_size() * 1.5).round() }
+fn icon_container() -> f32 { icon_size() + 4.0 }
+fn row_padding() -> f32 { (common::text_size() * 0.5).round() }
+fn icon_label_spacing() -> f32 { (common::text_size() * 0.625).round() }
 
 fn truncate_to_width(ui: &Ui, s: &str, font: FontId, max_width: f32) -> String {
     let full = ui.painter().layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE);
@@ -331,7 +331,7 @@ impl App {
         let input_response = egui::TopBottomPanel::top("input")
             .frame(common::input_frame())
             .show(ctx, |ui: &mut Ui| {
-                let input_font = FontId::new(INPUT_SIZE, FontFamily::Proportional);
+                let input_font = FontId::new(common::input_size(), FontFamily::Proportional);
                 let old_query = self.query.clone();
                 let input = egui::TextEdit::singleline(&mut self.query)
                     .font(input_font.clone())
@@ -369,7 +369,7 @@ impl App {
             .frame(common::panel_frame())
             .show(ctx, |ui: &mut Ui| {
                 let content_width = ui.available_width();
-                let row_height = ICON_CONTAINER + ROW_PADDING * 2.0;
+                let row_height = icon_container() + row_padding() * 2.0;
                 let header_height = input_response.response.rect.height();
                 let spacing_y = ui.spacing().item_spacing.y;
 
@@ -392,9 +392,10 @@ impl App {
                 let visible_height = (self.max_size.1 - header_height).max(row_height);
                 let scroll_to_selected = down || up;
 
-                let text_font = FontId::new(TEXT_SIZE, FontFamily::Proportional);
-                let ws_font = FontId::new(TEXT_SIZE * 0.8, FontFamily::Monospace);
-                let text_x = ROW_PADDING + ICON_CONTAINER + ICON_LABEL_SPACING;
+                let text_size = common::text_size();
+                let text_font = FontId::new(text_size, FontFamily::Proportional);
+                let ws_font = FontId::new(text_size * 0.8, FontFamily::Monospace);
+                let text_x = row_padding() + icon_container() + icon_label_spacing();
 
                 // Cache display names on width change
                 if (self.last_content_width - content_width).abs() > 1.0 || self.display_names.is_empty() {
@@ -402,7 +403,7 @@ impl App {
                     self.display_names.clear();
                     for &idx in &self.filtered {
                         let e = &self.entries[idx];
-                        let right_margin = if e.is_window() { ICON_CONTAINER + ROW_PADDING * 2.0 } else { ROW_PADDING };
+                        let right_margin = if e.is_window() { icon_container() + row_padding() * 2.0 } else { row_padding() };
                         let available_width = content_width - text_x - right_margin;
                         let display_name = truncate_to_width(ui, e.name(), text_font.clone(), available_width);
                         self.display_names.insert(idx, display_name);
@@ -432,8 +433,8 @@ impl App {
 
                             if let Some(tex) = e.icon() {
                                 let img_rect = egui::Rect::from_min_size(
-                                    egui::pos2(ROW_PADDING + (ICON_CONTAINER - ICON_SIZE) / 2.0, row_y + ROW_PADDING + (ICON_CONTAINER - ICON_SIZE) / 2.0),
-                                    egui::vec2(ICON_SIZE, ICON_SIZE),
+                                    egui::pos2(row_padding() + (icon_container() - icon_size()) / 2.0, row_y + row_padding() + (icon_container() - icon_size()) / 2.0),
+                                    egui::vec2(icon_size(), icon_size()),
                                 );
                                 ui.painter().image(
                                     tex.id(),
@@ -443,7 +444,7 @@ impl App {
                                 );
                             }
 
-                            let text_y = row_y + (row_height - TEXT_SIZE) / 2.0;
+                            let text_y = row_y + (row_height - text_size) / 2.0;
                             let display_name = display_names.get(&idx).map(|s| s.as_str()).unwrap_or(e.name());
                             ui.painter().text(
                                 egui::pos2(text_x, text_y),
@@ -455,10 +456,10 @@ impl App {
 
                             if let Some(ws) = e.workspace() {
                                 let badge_center = egui::pos2(
-                                    content_width - ROW_PADDING - ICON_CONTAINER / 2.0,
+                                    content_width - row_padding() - icon_container() / 2.0,
                                     row_y + row_height / 2.0,
                                 );
-                                let badge_r = ICON_CONTAINER / 2.0;
+                                let badge_r = icon_container() / 2.0;
                                 ui.painter().circle_filled(badge_center, badge_r, colors::BG_SELECTED);
                                 ui.painter().text(
                                     badge_center,
