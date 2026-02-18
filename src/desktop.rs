@@ -227,8 +227,8 @@ pub fn build_icon_index() -> HashMap<String, PathBuf> {
         vec!["hicolor"]
     };
 
-    for base in &dirs {
-        for theme in &themes {
+    for theme in &themes {
+        for base in &dirs {
             let theme_dir = base.join(theme);
             for size in &sizes {
                 for cat in ["apps", "applications"] {
