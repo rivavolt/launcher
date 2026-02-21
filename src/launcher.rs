@@ -394,7 +394,7 @@ impl App {
 
                 let text_size = common::text_size();
                 let text_font = FontId::new(text_size, FontFamily::Proportional);
-                let ws_font = FontId::new(text_size * 0.8, FontFamily::Monospace);
+
                 let text_x = row_padding() + icon_container() + icon_label_spacing();
 
                 // Cache display names on width change
@@ -454,20 +454,14 @@ impl App {
                                 text_color,
                             );
 
-                            if let Some(ws) = e.workspace() {
-                                let badge_center = egui::pos2(
+                            if e.is_window() {
+                                let circle_center = egui::pos2(
                                     content_width - row_padding() - icon_container() / 2.0,
                                     row_y + row_height / 2.0,
                                 );
-                                let badge_r = icon_container() / 2.0;
-                                ui.painter().circle_filled(badge_center, badge_r, colors::BG_SELECTED);
-                                ui.painter().text(
-                                    badge_center,
-                                    egui::Align2::CENTER_CENTER,
-                                    ws,
-                                    ws_font.clone(),
-                                    colors::ACCENT,
-                                );
+                                let circle_r = 3.0;
+                                let dot_color = if sel { colors::ACCENT } else { colors::TEXT_MUTED };
+                                ui.painter().circle_filled(circle_center, circle_r, dot_color);
                             }
                         },
                     )
