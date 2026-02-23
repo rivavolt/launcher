@@ -49,7 +49,7 @@
 
             postInstall = ''
               # Wrap both binaries with library paths
-              for bin in launcher clipboard; do
+              for bin in launcher clipboard picker; do
                 wrapProgram $out/bin/$bin \
                   --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath [
                     pkgs.wayland

@@ -11,6 +11,10 @@ path = "src/launcher.rs"
 name = "clipboard"
 path = "src/clipboard.rs"
 
+[[bin]]
+name = "picker"
+path = "src/picker.rs"
+
 [dependencies]
 egui = "0.33"
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
