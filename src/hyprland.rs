@@ -27,6 +27,8 @@ pub struct Client {
     pub workspace: Workspace,
     #[serde(rename = "focusHistoryID")]
     pub focus_history_id: i32,
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 pub fn monitor() -> Option<Monitor> {

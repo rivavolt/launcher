@@ -716,6 +716,7 @@ fn collect_hyprland_windows(ctx: &Context, icon_index: &HashMap<String, PathBuf>
         .into_iter()
         .filter(|c| !c.class.is_empty() && c.class != "launcher")
         .filter(|c| !c.workspace.name.starts_with("special:"))
+        .filter(|c| !c.pinned)
         .map(|c| {
             let class_lower = c.class.to_lowercase();
             let icon_path = wmclass_icons.get(&class_lower)
