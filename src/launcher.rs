@@ -192,9 +192,9 @@ impl App {
 
     fn default_order(&self) -> Vec<usize> {
         let mut indices: Vec<usize> = (0..self.entries.len().min(50)).collect();
-        // Previously focused windows first, current window last (you're switching away)
+        // Previously focused windows first; skip fhid 0 (launcher) and 1 (window you just left)
         indices.sort_by_key(|&i| match &self.entries[i] {
-            Entry::Window { focus_history_id, .. } if *focus_history_id == 0 => (1, 0),
+            Entry::Window { focus_history_id, .. } if *focus_history_id <= 1 => (1, *focus_history_id),
             Entry::Window { focus_history_id, .. } => (0, *focus_history_id),
             Entry::Desktop { .. } => (2, i as i32),
         });
@@ -244,10 +244,10 @@ impl App {
                     // Open windows rank above desktop entries for same app
                     let window_bonus: u32 = if e.is_window() { 3000 } else { 0 };
 
-                    // Recently focused windows rank higher (skip current, you're switching away)
+                    // Recently focused windows rank higher (skip launcher=0 and just-left=1)
                     let recency_bonus: u32 = match e {
-                        Entry::Window { focus_history_id, .. } if *focus_history_id > 0 => {
-                            2000 / (*focus_history_id as u32)
+                        Entry::Window { focus_history_id, .. } if *focus_history_id > 1 => {
+                            2000 / (*focus_history_id as u32 - 1)
                         }
                         _ => 0,
                     };
