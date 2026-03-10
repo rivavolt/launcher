@@ -101,7 +101,7 @@
                 rules = cls: ''
                   windowrule = workspace special:${cls} silent, match:class ${cls}
                   windowrule = float on, match:class ${cls}
-                  windowrule = move (monitor_w/2-window_w/2) (monitor_h*0.382-window_h/2), match:class ${cls}
+                  windowrule = move (monitor_w/2-window_w/2) (monitor_h*0.236), match:class ${cls}
                   windowrule = rounding 12, match:class ${cls}
                 '';
               in rules "launcher" + rules "clipboard";
