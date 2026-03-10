@@ -72,9 +72,14 @@ impl Entry {
     fn name(&self) -> &str {
         match self {
             Entry::Desktop { name, .. } => name,
-            Entry::Window { title, class, .. } => {
-                if title.is_empty() { class } else { title }
-            }
+            Entry::Window { class, .. } => class,
+        }
+    }
+
+    fn subtitle(&self) -> Option<&str> {
+        match self {
+            Entry::Window { title, class, .. } if !title.is_empty() && title != class => Some(title),
+            _ => None,
         }
     }
 
@@ -414,6 +419,9 @@ impl App {
 
                 let text_size = common::text_size();
                 let text_font = FontId::new(text_size, FontFamily::Proportional);
+                let subtitle_size = (text_size / common::GOLDEN).round();
+                let subtitle_font = FontId::new(subtitle_size, FontFamily::Proportional);
+                let line_gap = 2.0;
 
                 let text_x = row_padding() + icon_container() + icon_label_spacing();
 
@@ -464,15 +472,38 @@ impl App {
                                 );
                             }
 
-                            let text_y = row_y + (row_height - text_size) / 2.0;
                             let display_name = display_names.get(&idx).map(|s| s.as_str()).unwrap_or(e.name());
-                            ui.painter().text(
-                                egui::pos2(text_x, text_y),
-                                egui::Align2::LEFT_TOP,
-                                display_name,
-                                text_font.clone(),
-                                text_color,
-                            );
+                            if let Some(sub) = e.subtitle() {
+                                let total_h = text_size + line_gap + subtitle_size;
+                                let primary_y = row_y + (row_height - total_h) / 2.0;
+                                ui.painter().text(
+                                    egui::pos2(text_x, primary_y),
+                                    egui::Align2::LEFT_TOP,
+                                    display_name,
+                                    text_font.clone(),
+                                    text_color,
+                                );
+                                let right_margin = icon_container() + row_padding() * 2.0;
+                                let avail = content_width - text_x - right_margin;
+                                let sub_display = truncate_to_width(ui, sub, subtitle_font.clone(), avail);
+                                let sub_color = if sel { colors::TEXT_SECONDARY } else { colors::TEXT_SUBTITLE };
+                                ui.painter().text(
+                                    egui::pos2(text_x, primary_y + text_size + line_gap),
+                                    egui::Align2::LEFT_TOP,
+                                    sub_display,
+                                    subtitle_font.clone(),
+                                    sub_color,
+                                );
+                            } else {
+                                let text_y = row_y + (row_height - text_size) / 2.0;
+                                ui.painter().text(
+                                    egui::pos2(text_x, text_y),
+                                    egui::Align2::LEFT_TOP,
+                                    display_name,
+                                    text_font.clone(),
+                                    text_color,
+                                );
+                            }
 
                             if e.is_window() {
                                 let circle_center = egui::pos2(

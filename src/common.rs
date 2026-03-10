@@ -38,6 +38,7 @@ pub mod colors {
     pub const BG_SELECTED: Color32 = Color32::from_rgb(16, 16, 16);
     pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(255, 255, 255);
     pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(170, 170, 170);
+    pub const TEXT_SUBTITLE: Color32 = Color32::from_rgb(100, 100, 100);
     pub const TEXT_MUTED: Color32 = Color32::from_rgb(60, 60, 60);
     pub const GHOST_TEXT: Color32 = Color32::from_rgb(40, 40, 40);
     pub const BG_PREVIEW: Color32 = Color32::from_rgb(16, 16, 16);
