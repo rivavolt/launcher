@@ -444,16 +444,6 @@ impl App {
 
         if down { self.selected = (self.selected + 1).min(max_sel); }
         if up { self.selected = self.selected.saturating_sub(1); }
-        if down || up {
-            if let Some(&idx) = self.filtered.get(self.selected) {
-                if let Entry::Window { ref workspace, ref address, .. } = self.entries[idx] {
-                    hyprland::dispatch_batch_async(&[
-                        ("workspace", workspace),
-                        ("alterzorder", &format!("top,address:{}", address)),
-                    ]);
-                }
-            }
-        }
         if activate { self.activate(); return; }
 
         // Input panel
