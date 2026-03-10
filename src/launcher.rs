@@ -258,10 +258,11 @@ impl App {
                         (ratio.min(1.0) * 1000.0) as u32
                     };
 
-                    let match_score = nucleo_score.max(jw_score)
-                        + prefix_bonus + name_bonus
+                    let base_score = nucleo_score.max(jw_score) + prefix_bonus + name_bonus;
+                    if base_score == 0 { return None; }
+
+                    let match_score = base_score
                         + window_bonus + recency_bonus + length_bonus;
-                    if match_score == 0 { return None; }
                     Some((match_score, idx))
                 })
                 .collect();
