@@ -466,11 +466,11 @@ impl App {
                         &format!("exact {} {},class:launcher", self.max_size.0 as i32, target_height as i32),
                     );
                 } else if (target_height - self.last_height).abs() > 0.5 {
-                    self.last_height += (target_height - self.last_height) * 0.2;
+                    self.last_height += (target_height - self.last_height) * 0.35;
                     if (target_height - self.last_height).abs() < 1.0 {
                         self.last_height = target_height;
                     }
-                    hyprland::dispatch_async(
+                    hyprland::dispatch(
                         "resizewindowpixel",
                         &format!("exact {} {},class:launcher", self.max_size.0 as i32, self.last_height as i32),
                     );
@@ -502,9 +502,9 @@ impl App {
                 }
 
                 if self.filtered.is_empty() && !self.query.is_empty() {
-                    ui.add_space(row_height / 3.0);
+                    ui.add_space(row_height / 2.0);
                     ui.vertical_centered(|ui| {
-                        ui.label(RichText::new("No results").font(subtitle_font.clone()).color(colors::TEXT_MUTED));
+                        ui.label(RichText::new("No results").font(text_font.clone()).color(colors::TEXT_MUTED));
                     });
                 } else {
                     let filtered = &self.filtered;
