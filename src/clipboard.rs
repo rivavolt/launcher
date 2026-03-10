@@ -1,25 +1,43 @@
-//! Clipboard manager using eframe (regular window in special workspace)
+//! Clipboard manager — reads from clipd's SQLite database
 
+use launcher::clip::db::{self, ClipboardDb};
+use launcher::clip::mime as clip_mime;
 use launcher::common::{self, colors, handle_navigation_keys, truncate, virtual_list};
 use launcher::scroll::ScrollMomentum;
 use launcher::hyprland;
 use eframe::egui::{self, CentralPanel, Context, ScrollArea, FontFamily, FontId, Ui};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
-use regex::Regex;
-use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
+use std::collections::HashSet;
 use std::io::Write as IoWrite;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 struct Entry {
-    id: String,
+    id: i64,
+    content: Vec<u8>,
     text: String,
-    full_text: Option<String>,
+    mime: String,
+    source_app: Option<String>,
+    last_used: i64,
+    pinned: bool,
     is_image: bool,
     dims: Option<(u32, u32)>,
     texture: Option<egui::TextureHandle>,
     thumb: Option<egui::TextureHandle>,
+}
+
+/// Format a unix timestamp as compact relative time
+fn relative_time(unix_secs: i64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let diff = now - unix_secs;
+    if diff < 60 { "now".into() }
+    else if diff < 3600 { format!("{}m", diff / 60) }
+    else if diff < 86400 { format!("{}h", diff / 3600) }
+    else if diff < 7 * 86400 { format!("{}d", diff / 86400) }
+    else { format!("{}w", diff / (7 * 86400)) }
 }
 
 struct App {
@@ -27,8 +45,6 @@ struct App {
     entries: Vec<Entry>,
     filtered: Vec<usize>,
     selected: usize,
-    re: Regex,
-    textures: HashMap<String, egui::TextureHandle>,
     failed_textures: HashSet<usize>,
     should_hide: bool,
     loaded: bool,
@@ -44,7 +60,6 @@ struct App {
 
 impl App {
     fn new() -> Self {
-        let re = Regex::new(r"\[\[\s*binary data\s+[\d.]+\s*\w+\s+(\w+)\s+(\d+)x(\d+)\s*\]\]").unwrap();
         let eframe_size = hyprland::window_size(0.618, 0.618, (500.0, 400.0));
         let max_size = (eframe_size.0 * 2.0, eframe_size.1 * 2.0);
 
@@ -53,8 +68,6 @@ impl App {
             entries: Vec::new(),
             filtered: Vec::new(),
             selected: 0,
-            re,
-            textures: HashMap::new(),
             failed_textures: HashSet::new(),
             should_hide: false,
             loaded: false,
@@ -72,9 +85,10 @@ impl App {
     fn setup_watcher(&mut self, ctx: &Context) {
         use std::sync::atomic::Ordering;
 
-        let db_dir = std::env::var("HOME")
-            .map(|h| PathBuf::from(h).join(".cache/cliphist"))
-            .unwrap_or_else(|_| PathBuf::from("/tmp/cliphist"));
+        let db_dir = db::default_db_path()
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| "/tmp".into());
 
         let needs_reload = self.needs_reload.clone();
         let ctx = ctx.clone();
@@ -83,14 +97,7 @@ impl App {
             move |res: Result<notify::Event, notify::Error>| {
                 if let Ok(event) = res {
                     use notify::EventKind;
-                    let is_write = matches!(
-                        event.kind,
-                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-                    );
-                    let is_db = is_write && event.paths.iter().any(|p| {
-                        p.file_name().is_some_and(|n| n == "db")
-                    });
-                    if is_db {
+                    if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)) {
                         needs_reload.store(true, Ordering::SeqCst);
                         ctx.request_repaint();
                     }
@@ -105,48 +112,70 @@ impl App {
         }
     }
 
-    fn ensure_full_text(&mut self, idx: usize) {
-        let e = &self.entries[idx];
-        if !e.is_image && e.full_text.is_none() {
-            if let Ok(mut p) = Command::new("cliphist").arg("decode")
-                .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()
-            {
-                if let Some(mut stdin) = p.stdin.take() {
-                    let _ = stdin.write_all(e.id.as_bytes());
-                }
-                if let Ok(out) = p.wait_with_output() {
-                    if out.status.success() {
-                        self.entries[idx].full_text =
-                            Some(String::from_utf8_lossy(&out.stdout).into_owned());
-                    }
-                }
-            }
-        }
-    }
-
     fn ensure_texture(&mut self, ctx: &Context, idx: usize) {
         let e = &self.entries[idx];
         if e.is_image && e.texture.is_none() && !self.failed_textures.contains(&idx) {
-            if let Some(caps) = self.re.captures(&e.id) {
-                let fmt = caps.get(1).map(|m| m.as_str().to_lowercase()).unwrap_or("png".into());
-                if let Some((tex, thumb)) = decode_image(ctx, &e.id, &fmt) {
-                    self.textures.insert(e.id.clone(), tex.clone());
-                    self.entries[idx].texture = Some(tex);
-                    self.entries[idx].thumb = Some(thumb);
-                } else {
-                    self.failed_textures.insert(idx);
-                }
+            if let Ok(img) = image::load_from_memory(&e.content) {
+                let full = img.to_rgba8();
+                let full_size = [full.width() as usize, full.height() as usize];
+                let tex = ctx.load_texture(
+                    format!("clip_{}", e.id),
+                    egui::ColorImage::from_rgba_unmultiplied(full_size, &full.into_raw()),
+                    egui::TextureOptions::LINEAR,
+                );
+
+                let thumb_img = img.resize(128, 128, image::imageops::FilterType::CatmullRom).to_rgba8();
+                let thumb_size = [thumb_img.width() as usize, thumb_img.height() as usize];
+                let thumb = ctx.load_texture(
+                    format!("clip_{}_thumb", e.id),
+                    egui::ColorImage::from_rgba_unmultiplied(thumb_size, &thumb_img.into_raw()),
+                    egui::TextureOptions::LINEAR,
+                );
+
+                self.entries[idx].texture = Some(tex);
+                self.entries[idx].thumb = Some(thumb);
             } else {
                 self.failed_textures.insert(idx);
             }
         }
     }
 
-    fn load_entries(&mut self, ctx: &Context) {
+    fn load_entries(&mut self, _ctx: &Context) {
         let old_selected = self.selected;
         self.failed_textures.clear();
         self.last_ensured = None;
-        self.entries = collect(ctx, &self.re, &mut self.textures);
+
+        let db_entries = ClipboardDb::open_default()
+            .and_then(|db| db.list(500))
+            .unwrap_or_default();
+
+        self.entries = db_entries.into_iter().map(|e| {
+            let is_image = clip_mime::is_image_mime(&e.mime);
+            let text = if is_image {
+                String::new()
+            } else {
+                String::from_utf8_lossy(&e.content).into_owned()
+            };
+            let dims = if is_image {
+                imagesize::blob_size(&e.content).ok().map(|s| (s.width as u32, s.height as u32))
+            } else {
+                None
+            };
+            Entry {
+                id: e.id,
+                content: e.content,
+                mime: e.mime,
+                source_app: e.source_app,
+                last_used: e.last_used,
+                pinned: e.pinned,
+                text,
+                is_image,
+                dims,
+                texture: None,
+                thumb: None,
+            }
+        }).collect();
+
         self.filter();
         self.selected = old_selected.min(self.filtered.len().saturating_sub(1));
         self.loaded = true;
@@ -169,17 +198,22 @@ impl App {
     fn activate(&mut self) {
         let Some(&idx) = self.filtered.get(self.selected) else { return };
         let e = &self.entries[idx];
-        if let Ok(mut p) = Command::new("cliphist").arg("decode").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn() {
-            if let Some(mut stdin) = p.stdin.take() { let _ = stdin.write_all(e.id.as_bytes()); }
-            if let Ok(out) = p.wait_with_output() {
-                if out.status.success() {
-                    if let Ok(mut wl) = Command::new("wl-copy").stdin(Stdio::piped()).spawn() {
-                        if let Some(mut stdin) = wl.stdin.take() { let _ = stdin.write_all(&out.stdout); }
-                        let _ = wl.wait();
-                    }
-                }
-            }
+
+        let mut cmd = Command::new("wl-copy");
+        if e.is_image {
+            cmd.arg("--type").arg(&e.mime);
         }
+        if let Ok(mut wl) = cmd.stdin(Stdio::piped()).spawn() {
+            if let Some(mut stdin) = wl.stdin.take() {
+                let _ = stdin.write_all(&e.content);
+            }
+            let _ = wl.wait();
+        }
+
+        if let Ok(db) = ClipboardDb::open_default() {
+            let _ = db.update_last_used(e.id);
+        }
+
         self.should_hide = true;
     }
 
@@ -194,10 +228,11 @@ impl App {
     fn delete(&mut self, ctx: &Context) {
         let Some(&idx) = self.filtered.get(self.selected) else { return };
         let e = &self.entries[idx];
-        if let Ok(mut p) = Command::new("cliphist").arg("delete").stdin(Stdio::piped()).spawn() {
-            if let Some(mut stdin) = p.stdin.take() { let _ = stdin.write_all(e.id.as_bytes()); }
-            let _ = p.wait();
+
+        if let Ok(db) = ClipboardDb::open_default() {
+            let _ = db.delete(e.id);
         }
+
         self.load_entries(ctx);
         self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
     }
@@ -244,11 +279,10 @@ impl App {
             ctx.request_repaint();
         }
 
-        // Ensure texture + full text for selected entry (skip if unchanged)
+        // Ensure texture for selected entry
         if let Some(&idx) = self.filtered.get(self.selected) {
             if self.last_ensured != Some(idx) {
                 self.ensure_texture(ctx, idx);
-                self.ensure_full_text(idx);
                 self.last_ensured = Some(idx);
             }
         }
@@ -264,28 +298,25 @@ impl App {
                 if e.is_image {
                     let h = if let Some(tex) = &e.texture {
                         let ts = tex.size_vec2();
-                        let preview_w = self.max_size.0 * 0.382 - 20.0; // minus inner margin
+                        let preview_w = self.max_size.0 * 0.382 - 20.0;
                         let scale = (preview_w / ts.x).min(1.0);
-                        ts.y * scale + common::text_size() + 8.0 // image + dims label + spacing
+                        ts.y * scale + common::text_size() * 2.0 + 16.0
                     } else { 0.0 };
                     (true, h)
+                } else if e.text.contains('\n') || e.text.chars().count() > 80 {
+                    let preview_w = self.max_size.0 * 0.382 - 20.0;
+                    let font = FontId::new(common::text_size() * 0.85, FontFamily::Proportional);
+                    let galley = ctx.fonts(|f| f.layout(
+                        e.text.clone(), font, colors::TEXT_PRIMARY, preview_w,
+                    ));
+                    (true, galley.size().y + common::text_size() + 16.0)
                 } else {
-                    let full = e.full_text.as_deref().unwrap_or(&e.text);
-                    if full.contains('\n') || full.chars().count() > 80 {
-                        let preview_w = self.max_size.0 * 0.382 - 20.0;
-                        let font = FontId::new(common::text_size() * 0.85, FontFamily::Proportional);
-                        let galley = ctx.fonts(|f| f.layout(
-                            full.to_owned(), font, colors::TEXT_PRIMARY, preview_w,
-                        ));
-                        (true, galley.size().y)
-                    } else {
-                        (false, 0.0)
-                    }
+                    (false, 0.0)
                 }
             })
             .unwrap_or((false, 0.0));
 
-        // Preview pane (right side) when there's content to show
+        // Preview pane (right side)
         if has_preview {
             egui::SidePanel::right("preview")
                 .frame(common::preview_frame())
@@ -307,15 +338,14 @@ impl App {
                                     }
                                     if let Some((w, h)) = e.dims {
                                         ui.add_space(4.0);
-                                        ui.label(egui::RichText::new(format!("{}x{}", w, h))
-                                            .font(FontId::new(common::text_size() * 0.85, FontFamily::Proportional))
+                                        ui.label(egui::RichText::new(format!("{}×{}", w, h))
+                                            .font(FontId::new(common::text_size() * 0.85, FontFamily::Monospace))
                                             .color(colors::TEXT_SUBTITLE));
                                     }
                                 } else {
-                                    let full = e.full_text.as_deref().unwrap_or(&e.text);
                                     let font = FontId::new(common::text_size() * 0.85, FontFamily::Proportional);
                                     let galley = ui.painter().layout(
-                                        full.to_owned(),
+                                        e.text.clone(),
                                         font,
                                         colors::TEXT_PRIMARY,
                                         ui.available_width(),
@@ -323,6 +353,19 @@ impl App {
                                     let (rect, _) = ui.allocate_exact_size(galley.size(), egui::Sense::hover());
                                     ui.painter().galley(rect.min, galley, colors::TEXT_PRIMARY);
                                 }
+
+                                // Metadata line: mime · source_app · timestamp
+                                ui.add_space(8.0);
+                                let meta_font = FontId::new(common::text_size() * 0.75, FontFamily::Monospace);
+                                let mut parts = vec![e.mime.as_str()];
+                                if let Some(app) = &e.source_app {
+                                    parts.push(app.as_str());
+                                }
+                                let time_str = relative_time(e.last_used);
+                                parts.push(&time_str);
+                                ui.label(egui::RichText::new(parts.join(" · "))
+                                    .font(meta_font)
+                                    .color(colors::TEXT_SUBTITLE));
                             });
                     }
                 });
@@ -342,7 +385,6 @@ impl App {
                 } else {
                     0.0
                 };
-                // preview content height + header + preview frame margins (20px)
                 let min_height = if has_preview {
                     (header_height + preview_content_height + 20.0).min(self.max_size.1)
                 } else {
@@ -401,6 +443,21 @@ impl App {
                                     let rx = rect.min.x + x_offset;
                                     let text_font = FontId::new(common::text_size(), FontFamily::Proportional);
 
+                                    // Right-aligned timestamp
+                                    let time_text = relative_time(e.last_used);
+                                    let time_font = FontId::new(common::text_size() * 0.8, FontFamily::Monospace);
+                                    let time_color = egui::Color32::from_rgba_unmultiplied(
+                                        colors::TEXT_SUBTITLE.r(), colors::TEXT_SUBTITLE.g(),
+                                        colors::TEXT_SUBTITLE.b(), alpha,
+                                    );
+                                    ui.painter().text(
+                                        egui::pos2(rect.max.x - 12.0, rect.min.y + (common::row_height() - common::text_size() * 0.8) / 2.0),
+                                        egui::Align2::RIGHT_TOP,
+                                        &time_text,
+                                        time_font,
+                                        time_color,
+                                    );
+
                                     if e.is_image {
                                         // Fixed square thumbnail container
                                         let container_size = common::row_height() - 4.0;
@@ -408,14 +465,12 @@ impl App {
                                             egui::pos2(rx + 8.0, rect.min.y + 2.0),
                                             egui::vec2(container_size, container_size),
                                         );
-                                        // Subtle background for the container
                                         ui.painter().rect_filled(container_rect, 2.0,
                                             egui::Color32::from_rgba_premultiplied(13, 13, 13, alpha));
 
                                         let row_tex = e.thumb.as_ref().or(e.texture.as_ref());
                                         if let Some(tex) = row_tex {
                                             let tex_size = tex.size_vec2();
-                                            // Fit image within square, preserve aspect ratio
                                             let scale = (container_size / tex_size.x).min(container_size / tex_size.y);
                                             let img_w = tex_size.x * scale;
                                             let img_h = tex_size.y * scale;
@@ -447,7 +502,7 @@ impl App {
                                             egui::Align2::LEFT_TOP, &display_text, mono_font, text_color,
                                         );
                                     } else {
-                                        let display_text = truncate(&e.text, 80);
+                                        let display_text = truncate(&e.text, 70);
                                         let text_pos = egui::pos2(
                                             rx + 12.0,
                                             rect.min.y + (common::row_height() - common::text_size()) / 2.0,
@@ -512,90 +567,4 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(App::new()))
         }),
     )
-}
-
-fn temp_dir() -> PathBuf {
-    let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or("/tmp".into());
-    PathBuf::from(runtime).join("clipboard-cache")
-}
-
-fn collect(ctx: &Context, re: &Regex, textures: &mut HashMap<String, egui::TextureHandle>) -> Vec<Entry> {
-    let Ok(out) = Command::new("cliphist").arg("list").output() else { return vec![] };
-    if !out.status.success() { return vec![]; }
-
-    let _ = std::fs::create_dir_all(temp_dir());
-    let mut seen = std::collections::HashSet::new();
-    let mut entries: Vec<Entry> = Vec::new();
-
-    for (i, line) in String::from_utf8_lossy(&out.stdout).lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() { continue; }
-
-        if let Some(caps) = re.captures(line) {
-            if !seen.insert(line.to_string()) { continue; }
-            let fmt = caps.get(1).map(|m| m.as_str().to_lowercase());
-            let w = caps.get(2).and_then(|m| m.as_str().parse().ok());
-            let h = caps.get(3).and_then(|m| m.as_str().parse().ok());
-
-            let (texture, thumb) = if i < 20 {
-                if let Some(tex) = textures.get(line).cloned() {
-                    (Some(tex), None)
-                } else if let Some((tex, th)) = decode_image(ctx, line, &fmt.clone().unwrap_or("png".into())) {
-                    textures.insert(line.to_string(), tex.clone());
-                    (Some(tex), Some(th))
-                } else {
-                    (None, None)
-                }
-            } else { (None, None) };
-
-            entries.push(Entry { id: line.into(), text: "[image]".into(), full_text: None, is_image: true, dims: w.zip(h), texture, thumb });
-        } else {
-            let text = line.split_once('\t').map(|(_, t)| t).unwrap_or(line).to_string();
-            if !seen.insert(text.clone()) { continue; }
-            entries.push(Entry { id: line.into(), text, full_text: None, is_image: false, dims: None, texture: None, thumb: None });
-        }
-    }
-    entries
-}
-
-fn id_hash(id: &str) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    id.hash(&mut h);
-    h.finish()
-}
-
-fn decode_image(ctx: &Context, id: &str, ext: &str) -> Option<(egui::TextureHandle, egui::TextureHandle)> {
-    let hash = id_hash(id);
-    let path = temp_dir().join(format!("img_{:x}.{}", hash, ext));
-
-    if !path.exists() {
-        let mut p = Command::new("cliphist").arg("decode").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().ok()?;
-        if let Some(mut stdin) = p.stdin.take() { let _ = stdin.write_all(id.as_bytes()); }
-        let out = p.wait_with_output().ok()?;
-        if !out.status.success() || out.stdout.is_empty() { return None; }
-        std::fs::write(&path, &out.stdout).ok()?;
-    }
-
-    let data = std::fs::read(&path).ok()?;
-    let img = image::load_from_memory(&data).ok()?;
-
-    // Full-resolution texture for preview overlay
-    let full = img.to_rgba8();
-    let full_size = [full.width() as usize, full.height() as usize];
-    let tex = ctx.load_texture(
-        format!("clip_{:x}", hash),
-        egui::ColorImage::from_rgba_unmultiplied(full_size, &full.into_raw()),
-        egui::TextureOptions::LINEAR,
-    );
-
-    // CPU-downscaled thumbnail for list rows
-    let thumb_img = img.resize(128, 128, image::imageops::FilterType::CatmullRom).to_rgba8();
-    let thumb_size = [thumb_img.width() as usize, thumb_img.height() as usize];
-    let thumb = ctx.load_texture(
-        format!("clip_{:x}_thumb", hash),
-        egui::ColorImage::from_rgba_unmultiplied(thumb_size, &thumb_img.into_raw()),
-        egui::TextureOptions::LINEAR,
-    );
-
-    Some((tex, thumb))
 }
