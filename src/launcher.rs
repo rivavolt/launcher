@@ -21,6 +21,72 @@ fn icon_container() -> f32 { icon_size() + 4.0 }
 fn row_padding() -> f32 { (common::text_size() * 0.5).round() }
 fn icon_label_spacing() -> f32 { (common::text_size() * 0.625).round() }
 
+/// Find character indices where the query matches at word boundaries or as substring
+fn match_indices(text: &str, query: &str) -> Vec<usize> {
+    if query.is_empty() { return vec![]; }
+    let text_lower = text.to_lowercase();
+    let query_lower = query.to_lowercase();
+    // Try word-start matching first: greedily match query chars at word boundaries
+    let mut indices = Vec::new();
+    let mut qi = 0;
+    let query_chars: Vec<char> = query_lower.chars().collect();
+    // Try substring match first (contiguous)
+    if let Some(start) = text_lower.find(&query_lower) {
+        let mut pos = start;
+        for _ in 0..query_lower.len() {
+            indices.push(pos);
+            pos += text_lower[pos..].chars().next().map_or(1, |c| c.len_utf8());
+        }
+        return indices;
+    }
+    // Fall back to fuzzy: prefer word starts, then sequential
+    for (ci, ch) in text_lower.char_indices() {
+        if qi >= query_chars.len() { break; }
+        if ch == query_chars[qi] {
+            indices.push(ci);
+            qi += 1;
+        }
+    }
+    if qi == query_chars.len() { indices } else { vec![] }
+}
+
+/// Paint text with highlighted match indices
+fn paint_highlighted(
+    ui: &Ui,
+    pos: egui::Pos2,
+    text: &str,
+    font: &FontId,
+    base_color: Color32,
+    highlight_color: Color32,
+    match_indices: &[usize],
+) {
+    if match_indices.is_empty() {
+        ui.painter().text(pos, egui::Align2::LEFT_TOP, text, font.clone(), base_color);
+        return;
+    }
+    let mut job = egui::text::LayoutJob::default();
+    let mut last = 0;
+    for &idx in match_indices {
+        if idx > last {
+            job.append(&text[last..idx], 0.0, egui::TextFormat {
+                font_id: font.clone(), color: base_color, ..Default::default()
+            });
+        }
+        let ch_len = text[idx..].chars().next().map_or(1, |c| c.len_utf8());
+        job.append(&text[idx..idx + ch_len], 0.0, egui::TextFormat {
+            font_id: font.clone(), color: highlight_color, ..Default::default()
+        });
+        last = idx + ch_len;
+    }
+    if last < text.len() {
+        job.append(&text[last..], 0.0, egui::TextFormat {
+            font_id: font.clone(), color: base_color, ..Default::default()
+        });
+    }
+    let galley = ui.fonts(|f| f.layout_job(job));
+    ui.painter().galley(pos, galley, Color32::TRANSPARENT);
+}
+
 fn truncate_to_width(ui: &Ui, s: &str, font: FontId, max_width: f32) -> String {
     let full = ui.painter().layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE);
     if full.rect.width() <= max_width {
@@ -79,13 +145,6 @@ impl Entry {
     fn subtitle(&self) -> Option<&str> {
         match self {
             Entry::Window { title, class, .. } if !title.is_empty() && title != class => Some(title),
-            _ => None,
-        }
-    }
-
-    fn workspace(&self) -> Option<&str> {
-        match self {
-            Entry::Window { workspace, .. } => Some(workspace),
             _ => None,
         }
     }
@@ -357,18 +416,25 @@ impl App {
         let (down, up) = handle_navigation_keys(ctx, &mut self.held_key);
 
         let mut accept_ghost = false;
+        let mut clear_input = false;
         ctx.input(|i: &egui::InputState| {
             for event in &i.events {
-                if let egui::Event::Key { key, pressed: true, .. } = event {
+                if let egui::Event::Key { key, pressed: true, modifiers, .. } = event {
                     match key {
                         egui::Key::Escape => self.should_hide = true,
                         egui::Key::Enter => activate = true,
                         egui::Key::Tab => accept_ghost = true,
+                        egui::Key::U if modifiers.ctrl => clear_input = true,
                         _ => {}
                     }
                 }
             }
         });
+
+        if clear_input && !self.query.is_empty() {
+            self.query.clear();
+            self.filter();
+        }
 
         if accept_ghost && !self.ghost_text_cache.is_empty() {
             self.query.push_str(&self.ghost_text_cache);
@@ -510,6 +576,7 @@ impl App {
                     let filtered = &self.filtered;
                     let entries = &self.entries;
                     let display_names = &self.display_names;
+                    let query = &self.query;
 
                     let vl_output = ScrollArea::vertical()
                         .max_height(visible_height)
@@ -533,53 +600,43 @@ impl App {
                                         egui::pos2(row_padding() + (icon_container() - icon_size()) / 2.0, row_y + row_padding() + (icon_container() - icon_size()) / 2.0),
                                         egui::vec2(icon_size(), icon_size()),
                                     );
+                                    let tint = if sel { Color32::WHITE } else { Color32::from_rgba_premultiplied(128, 128, 128, 128) };
                                     ui.painter().image(
                                         tex.id(),
                                         img_rect,
                                         egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                                        Color32::WHITE,
+                                        tint,
                                     );
                                 }
 
                                 let display_name = display_names.get(&idx).map(|s| s.as_str()).unwrap_or(e.name());
+                                let highlight = colors::ACCENT;
                                 if let Some(sub) = e.subtitle() {
                                     let right_margin = icon_container() + row_padding() * 2.0;
                                     let avail = content_width - text_x - right_margin;
                                     let title_display = truncate_to_width(ui, sub, text_font.clone(), avail);
                                     let total_h = text_size + line_gap + subtitle_size;
                                     let primary_y = row_y + (row_height - total_h) / 2.0;
-                                    ui.painter().text(
-                                        egui::pos2(text_x, primary_y),
-                                        egui::Align2::LEFT_TOP,
-                                        title_display,
-                                        text_font.clone(),
-                                        text_color,
-                                    );
+                                    let title_matches = match_indices(&title_display, query);
+                                    paint_highlighted(ui, egui::pos2(text_x, primary_y), &title_display, &text_font, text_color, highlight, &title_matches);
                                     let sub_color = if sel { colors::TEXT_SECONDARY } else { colors::TEXT_SUBTITLE };
-                                    ui.painter().text(
-                                        egui::pos2(text_x, primary_y + text_size + line_gap),
-                                        egui::Align2::LEFT_TOP,
-                                        display_name,
-                                        subtitle_font.clone(),
-                                        sub_color,
-                                    );
+                                    let name_matches = match_indices(display_name, query);
+                                    paint_highlighted(ui, egui::pos2(text_x, primary_y + text_size + line_gap), display_name, &subtitle_font, sub_color, highlight, &name_matches);
                                 } else {
                                     let text_y = row_y + (row_height - text_size) / 2.0;
-                                    ui.painter().text(
-                                        egui::pos2(text_x, text_y),
-                                        egui::Align2::LEFT_TOP,
-                                        display_name,
-                                        text_font.clone(),
-                                        text_color,
-                                    );
+                                    let name_matches = match_indices(display_name, query);
+                                    paint_highlighted(ui, egui::pos2(text_x, text_y), display_name, &text_font, text_color, highlight, &name_matches);
                                 }
 
-                                if e.is_window() {
-                                    let circle_center = egui::pos2(
-                                        content_width - row_padding() - icon_container() / 2.0,
-                                        row_y + row_height / 2.0,
+                                if let Entry::Window { workspace, .. } = e {
+                                    let ws_color = if sel { colors::TEXT_SUBTITLE } else { colors::TEXT_MUTED };
+                                    ui.painter().text(
+                                        egui::pos2(content_width - row_padding(), row_y + row_height / 2.0),
+                                        egui::Align2::RIGHT_CENTER,
+                                        workspace,
+                                        subtitle_font.clone(),
+                                        ws_color,
                                     );
-                                    ui.painter().circle_filled(circle_center, 3.0, colors::ACCENT);
                                 }
                             },
                         )
