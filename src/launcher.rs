@@ -450,6 +450,7 @@ impl App {
                     hyprland::dispatch_batch_async(&[
                         ("workspace", workspace),
                         ("alterzorder", &format!("top,address:{}", address)),
+                        ("focuswindow", "class:launcher"),
                     ]);
                 }
             }
