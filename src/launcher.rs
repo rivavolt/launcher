@@ -65,23 +65,24 @@ fn paint_highlighted(
         return;
     }
     let mut job = egui::text::LayoutJob::default();
+    let base_fmt = egui::TextFormat { font_id: font.clone(), color: base_color, ..Default::default() };
+    let highlight_fmt = egui::TextFormat {
+        font_id: font.clone(),
+        color: base_color,
+        underline: egui::Stroke::new(1.0, highlight_color),
+        ..Default::default()
+    };
     let mut last = 0;
     for &idx in match_indices {
         if idx > last {
-            job.append(&text[last..idx], 0.0, egui::TextFormat {
-                font_id: font.clone(), color: base_color, ..Default::default()
-            });
+            job.append(&text[last..idx], 0.0, base_fmt.clone());
         }
         let ch_len = text[idx..].chars().next().map_or(1, |c| c.len_utf8());
-        job.append(&text[idx..idx + ch_len], 0.0, egui::TextFormat {
-            font_id: font.clone(), color: highlight_color, ..Default::default()
-        });
+        job.append(&text[idx..idx + ch_len], 0.0, highlight_fmt.clone());
         last = idx + ch_len;
     }
     if last < text.len() {
-        job.append(&text[last..], 0.0, egui::TextFormat {
-            font_id: font.clone(), color: base_color, ..Default::default()
-        });
+        job.append(&text[last..], 0.0, base_fmt);
     }
     let galley = ui.fonts(|f| f.layout_job(job));
     ui.painter().galley(pos, galley, Color32::TRANSPARENT);
@@ -443,17 +444,6 @@ impl App {
 
         if down { self.selected = (self.selected + 1).min(max_sel); }
         if up { self.selected = self.selected.saturating_sub(1); }
-        // Preview: switch workspace and raise the specific window behind overlay
-        if down || up {
-            if let Some(&idx) = self.filtered.get(self.selected) {
-                if let Entry::Window { ref workspace, ref address, .. } = self.entries[idx] {
-                    hyprland::dispatch_batch_async(&[
-                        ("workspace", workspace),
-                        ("alterzorder", &format!("top,address:{}", address)),
-                    ]);
-                }
-            }
-        }
         if activate { self.activate(); return; }
 
         // Input panel
