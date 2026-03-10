@@ -96,7 +96,7 @@
           config = lib.mkIf cfg.enable {
             environment.systemPackages = [ launcherPkg ];
 
-            home-manager.sharedModules = [{
+            home-manager.sharedModules = lib.optional config.programs.hyprland.enable {
               wayland.windowManager.hyprland.extraConfig = let
                 rules = cls: ''
                   windowrule = workspace special:${cls} silent, match:class ${cls}
@@ -105,7 +105,7 @@
                   windowrule = rounding 12, match:class ${cls}
                 '';
               in rules "launcher" + rules "clipboard";
-            }];
+            };
 
             systemd.user.services.launcher = {
               description = "Launcher (eframe)";
