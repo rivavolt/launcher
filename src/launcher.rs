@@ -350,17 +350,24 @@ impl App {
 
         let (down, up) = handle_navigation_keys(ctx, &mut self.held_key);
 
+        let mut accept_ghost = false;
         ctx.input(|i: &egui::InputState| {
             for event in &i.events {
                 if let egui::Event::Key { key, pressed: true, .. } = event {
                     match key {
                         egui::Key::Escape => self.should_hide = true,
                         egui::Key::Enter => activate = true,
+                        egui::Key::Tab => accept_ghost = true,
                         _ => {}
                     }
                 }
             }
         });
+
+        if accept_ghost && !self.ghost_text_cache.is_empty() {
+            self.query.push_str(&self.ghost_text_cache);
+            self.filter();
+        }
 
         if down { self.selected = (self.selected + 1).min(max_sel); }
         if up { self.selected = self.selected.saturating_sub(1); }
