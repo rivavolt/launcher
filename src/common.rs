@@ -35,7 +35,8 @@ pub mod colors {
     use eframe::egui::Color32;
     pub const BG_BASE: Color32 = Color32::from_rgb(0, 0, 0);
     pub const BG_INPUT: Color32 = Color32::from_rgb(16, 16, 16);
-    pub const BG_SELECTED: Color32 = Color32::from_rgb(16, 16, 16);
+    pub const BG_SELECTED: Color32 = Color32::from_rgb(24, 24, 28);
+    pub const BG_HOVER: Color32 = Color32::from_rgb(12, 12, 14);
     pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(255, 255, 255);
     pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(170, 170, 170);
     pub const TEXT_SUBTITLE: Color32 = Color32::from_rgb(100, 100, 100);
@@ -141,6 +142,11 @@ pub fn virtual_list(
         );
 
         let is_selected = i == selected;
+        let (_, response) = ui.allocate_exact_size(
+            egui::vec2(content_width, row_height),
+            Sense::click(),
+        );
+
         if is_selected {
             if !skip_selected_highlight {
                 ui.painter().rect_filled(row_rect, 0.0, colors::BG_SELECTED);
@@ -151,12 +157,9 @@ pub fn virtual_list(
                 ui.painter().rect_filled(bar, 0.0, colors::ACCENT);
             }
             selected_rect = Some(row_rect);
+        } else if response.hovered() {
+            ui.painter().rect_filled(row_rect, 0.0, colors::BG_HOVER);
         }
-
-        let (_, response) = ui.allocate_exact_size(
-            egui::vec2(content_width, row_height),
-            Sense::click(),
-        );
 
         render_row(ui, i, row_rect);
 
