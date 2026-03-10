@@ -450,7 +450,6 @@ impl App {
                     hyprland::dispatch_batch_async(&[
                         ("workspace", workspace),
                         ("alterzorder", &format!("top,address:{}", address)),
-                        ("focuswindow", "class:launcher"),
                     ]);
                 }
             }
@@ -474,7 +473,11 @@ impl App {
                         .desired_width(ui.available_width())
                         .show(ui)
                 }).inner;
-                output.response.request_focus();
+                if ui.ctx().input(|i| i.focused) {
+                    output.response.request_focus();
+                } else {
+                    output.response.surrender_focus();
+                }
                 if self.query != old_query { self.filter(); }
 
                 // Move cursor to end after ghost text acceptance
