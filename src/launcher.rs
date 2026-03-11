@@ -17,7 +17,7 @@ use strsim::jaro_winkler;
 const MAX_VISIBLE_ITEMS: usize = 15;
 
 fn icon_size() -> f32 { (common::text_size() * 1.5).round() }
-fn icon_container() -> f32 { icon_size() + 4.0 }
+fn icon_container() -> f32 { common::icon_container() }
 fn row_padding() -> f32 { (common::text_size() * 0.5).round() }
 fn icon_label_spacing() -> f32 { (common::text_size() * 0.625).round() }
 
@@ -463,7 +463,7 @@ impl App {
                     let display_names = &self.display_names;
                     let query = &self.query;
 
-                    let vl_output = ScrollArea::vertical()
+                    let scroll_output = ScrollArea::vertical()
                         .max_height(visible_height)
                         .show(ui, |ui: &mut Ui| {
                         virtual_list(
@@ -495,7 +495,7 @@ impl App {
                                 }
 
                                 let display_name = display_names.get(&idx).map(|s| s.as_str()).unwrap_or(e.name());
-                                let highlight = colors::TEXT_PRIMARY;
+                                let highlight = colors::ACCENT;
                                 if let Some(sub) = e.subtitle() {
                                     let right_margin = icon_container() + row_padding() * 2.0;
                                     let avail = content_width - text_x - right_margin;
@@ -531,9 +531,11 @@ impl App {
                                 }
                             },
                         )
-                    }).inner;
+                    });
 
-                    if let Some(i) = vl_output.clicked {
+                    common::paint_scroll_fade(ui, scroll_output.inner_rect, 16.0);
+
+                    if let Some(i) = scroll_output.inner.clicked {
                         self.selected = i;
                         self.activate();
                     }

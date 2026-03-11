@@ -198,7 +198,7 @@ impl eframe::App for App {
                 let filtered = &self.filtered;
                 let items = &self.items;
 
-                let vl_output = ScrollArea::vertical()
+                let scroll_output = ScrollArea::vertical()
                     .max_height(visible_height)
                     .show(ui, |ui: &mut Ui| {
                         virtual_list(
@@ -223,9 +223,11 @@ impl eframe::App for App {
                                 );
                             },
                         )
-                    }).inner;
+                    });
 
-                if let Some(i) = vl_output.clicked {
+                common::paint_scroll_fade(ui, scroll_output.inner_rect, 16.0);
+
+                if let Some(i) = scroll_output.inner.clicked {
                     self.selected = i;
                     self.activate();
                 }
