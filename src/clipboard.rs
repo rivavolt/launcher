@@ -2,7 +2,7 @@
 
 use launcher::clip::db::{self, ClipboardDb};
 use launcher::clip::mime as clip_mime;
-use launcher::common::{self, colors, handle_navigation_keys, truncate, virtual_list};
+use launcher::common::{self, colors, handle_navigation_keys, virtual_list};
 use launcher::scroll::ScrollMomentum;
 use launcher::hyprland;
 use eframe::egui::{self, CentralPanel, Context, ScrollArea, FontFamily, FontId, Ui};
@@ -19,20 +19,18 @@ struct Entry {
     mime: String,
     source_app: Option<String>,
     last_used: i64,
-    pinned: bool,
     is_image: bool,
     dims: Option<(u32, u32)>,
     texture: Option<egui::TextureHandle>,
     thumb: Option<egui::TextureHandle>,
 }
 
-/// Format a unix timestamp as compact relative time
+fn now_secs() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64
+}
+
 fn relative_time(unix_secs: i64) -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    let diff = now - unix_secs;
+    let diff = now_secs() - unix_secs;
     if diff < 60 { "now".into() }
     else if diff < 3600 { format!("{}m", diff / 60) }
     else if diff < 86400 { format!("{}h", diff / 3600) }
@@ -40,10 +38,26 @@ fn relative_time(unix_secs: i64) -> String {
     else { format!("{}w", diff / (7 * 86400)) }
 }
 
+fn time_bucket(unix_secs: i64, now: i64) -> &'static str {
+    let diff = now - unix_secs;
+    if diff < 300 { "Just now" }
+    else if diff < 86400 { "Today" }
+    else if diff < 172800 { "Yesterday" }
+    else if diff < 604800 { "This week" }
+    else if diff < 2592000 { "This month" }
+    else { "Older" }
+}
+
+#[derive(Clone, Copy)]
+enum DisplayItem {
+    Header(&'static str),
+    Entry(usize), // index into entries
+}
+
 struct App {
     query: String,
     entries: Vec<Entry>,
-    filtered: Vec<usize>,
+    display: Vec<DisplayItem>,
     selected: usize,
     failed_textures: HashSet<usize>,
     should_hide: bool,
@@ -66,7 +80,7 @@ impl App {
         Self {
             query: String::new(),
             entries: Vec::new(),
-            filtered: Vec::new(),
+            display: Vec::new(),
             selected: 0,
             failed_textures: HashSet::new(),
             should_hide: false,
@@ -79,6 +93,34 @@ impl App {
             max_size,
             last_height: 0.0,
             deleting: None,
+        }
+    }
+
+    /// Get the entry index for the currently selected display item
+    fn selected_entry_idx(&self) -> Option<usize> {
+        match self.display.get(self.selected)? {
+            DisplayItem::Entry(idx) => Some(*idx),
+            DisplayItem::Header(_) => None,
+        }
+    }
+
+    /// Navigate to the next Entry item in the given direction, skipping headers
+    fn nav_next(&self) -> usize {
+        let mut next = self.selected + 1;
+        while next < self.display.len() {
+            if matches!(self.display[next], DisplayItem::Entry(_)) { return next; }
+            next += 1;
+        }
+        self.selected
+    }
+
+    fn nav_prev(&self) -> usize {
+        if self.selected == 0 { return self.selected; }
+        let mut prev = self.selected - 1;
+        loop {
+            if matches!(self.display[prev], DisplayItem::Entry(_)) { return prev; }
+            if prev == 0 { return self.selected; }
+            prev -= 1;
         }
     }
 
@@ -167,7 +209,6 @@ impl App {
                 mime: e.mime,
                 source_app: e.source_app,
                 last_used: e.last_used,
-                pinned: e.pinned,
                 text,
                 is_image,
                 dims,
@@ -177,13 +218,17 @@ impl App {
         }).collect();
 
         self.filter();
-        self.selected = old_selected.min(self.filtered.len().saturating_sub(1));
+        self.selected = old_selected.min(self.display.len().saturating_sub(1));
+        // Snap to nearest entry if we landed on a header
+        if matches!(self.display.get(self.selected), Some(DisplayItem::Header(_))) {
+            self.selected = self.nav_next();
+        }
         self.loaded = true;
     }
 
     fn filter(&mut self) {
         let q = self.query.to_lowercase();
-        self.filtered = if q.is_empty() {
+        let entry_indices: Vec<usize> = if q.is_empty() {
             (0..self.entries.len().min(50)).collect()
         } else {
             self.entries.iter().enumerate()
@@ -192,11 +237,28 @@ impl App {
                 .take(50)
                 .collect()
         };
-        self.selected = 0;
+
+        // Build display list with section headers
+        self.display.clear();
+        let now = now_secs();
+        let mut last_bucket = "";
+        for &idx in &entry_indices {
+            let bucket = time_bucket(self.entries[idx].last_used, now);
+            if bucket != last_bucket {
+                self.display.push(DisplayItem::Header(bucket));
+                last_bucket = bucket;
+            }
+            self.display.push(DisplayItem::Entry(idx));
+        }
+
+        // Select first entry (skip headers)
+        self.selected = self.display.iter()
+            .position(|d| matches!(d, DisplayItem::Entry(_)))
+            .unwrap_or(0);
     }
 
     fn activate(&mut self) {
-        let Some(&idx) = self.filtered.get(self.selected) else { return };
+        let Some(idx) = self.selected_entry_idx() else { return };
         let e = &self.entries[idx];
 
         let mut cmd = Command::new("wl-copy");
@@ -226,7 +288,7 @@ impl App {
     }
 
     fn delete(&mut self, ctx: &Context) {
-        let Some(&idx) = self.filtered.get(self.selected) else { return };
+        let Some(idx) = self.selected_entry_idx() else { return };
         let e = &self.entries[idx];
 
         if let Ok(db) = ClipboardDb::open_default() {
@@ -234,11 +296,9 @@ impl App {
         }
 
         self.load_entries(ctx);
-        self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
     }
 
     fn render(&mut self, ctx: &Context) {
-        let max_sel = self.filtered.len().saturating_sub(1);
         let (mut activate, mut delete) = (false, false);
 
         let (down, up) = handle_navigation_keys(ctx, &mut self.held_key);
@@ -262,17 +322,15 @@ impl App {
         if let Some((_, t)) = self.deleting {
             let elapsed = t.elapsed().as_secs_f32();
             if elapsed >= 0.15 {
-                let sel = self.selected;
                 self.deleting = None;
                 self.delete(ctx);
-                self.selected = sel.min(self.filtered.len().saturating_sub(1));
             } else {
                 ctx.request_repaint();
             }
         }
 
-        if down { self.selected = (self.selected + 1).min(max_sel); }
-        if up { self.selected = self.selected.saturating_sub(1); }
+        if down { self.selected = self.nav_next(); }
+        if up { self.selected = self.nav_prev(); }
         if activate { self.activate(); return; }
         if delete && self.deleting.is_none() {
             self.deleting = Some((self.selected, std::time::Instant::now()));
@@ -280,7 +338,7 @@ impl App {
         }
 
         // Ensure texture for selected entry
-        if let Some(&idx) = self.filtered.get(self.selected) {
+        if let Some(idx) = self.selected_entry_idx() {
             if self.last_ensured != Some(idx) {
                 self.ensure_texture(ctx, idx);
                 self.last_ensured = Some(idx);
@@ -291,9 +349,9 @@ impl App {
         if input_panel.changed || input_panel.cleared { self.filter(); }
         let input_response = input_panel.response;
 
-        // Check if selected entry has preview content and compute its natural height
-        let (has_preview, preview_content_height) = self.filtered.get(self.selected)
-            .map(|&idx| {
+        // Check if selected entry has preview content
+        let (has_preview, preview_content_height) = self.selected_entry_idx()
+            .map(|idx| {
                 let e = &self.entries[idx];
                 if e.is_image {
                     let h = if let Some(tex) = &e.texture {
@@ -305,7 +363,7 @@ impl App {
                     (true, h)
                 } else if e.text.contains('\n') || e.text.chars().count() > 80 {
                     let preview_w = self.max_size.0 * 0.382 - 20.0;
-                    let font = FontId::new(common::text_size() * 0.85, FontFamily::Proportional);
+                    let font = FontId::new(common::text_size(), FontFamily::Proportional);
                     let galley = ctx.fonts(|f| f.layout(
                         e.text.clone(), font, colors::TEXT_PRIMARY, preview_w,
                     ));
@@ -323,7 +381,7 @@ impl App {
                 .resizable(false)
                 .exact_width(self.max_size.0 * 0.382)
                 .show(ctx, |ui| {
-                    if let Some(&idx) = self.filtered.get(self.selected) {
+                    if let Some(idx) = self.selected_entry_idx() {
                         let e = &self.entries[idx];
                         ScrollArea::vertical()
                             .id_salt("preview_scroll")
@@ -343,7 +401,7 @@ impl App {
                                             .color(colors::TEXT_SUBTITLE));
                                     }
                                 } else {
-                                    let font = FontId::new(common::text_size() * 0.85, FontFamily::Proportional);
+                                    let font = FontId::new(common::text_size(), FontFamily::Proportional);
                                     let galley = ui.painter().layout(
                                         e.text.clone(),
                                         font,
@@ -354,7 +412,7 @@ impl App {
                                     ui.painter().galley(rect.min, galley, colors::TEXT_PRIMARY);
                                 }
 
-                                // Metadata line: mime · source_app · timestamp
+                                // Metadata line
                                 ui.add_space(8.0);
                                 let meta_font = FontId::new(common::text_size() * 0.75, FontFamily::Monospace);
                                 let mut parts = vec![e.mime.as_str()];
@@ -376,7 +434,7 @@ impl App {
             .show(ctx, |ui: &mut Ui| {
                 let header_height = input_response.response.rect.height();
                 let max_visible = 12;
-                let num_items = self.filtered.len().min(max_visible);
+                let num_items = self.display.len().min(max_visible);
                 let spacing_y = ui.spacing().item_spacing.y;
                 let items_height = if num_items > 0 {
                     num_items as f32 * common::row_height() + (num_items - 1) as f32 * spacing_y
@@ -403,122 +461,171 @@ impl App {
                 let list_height = (self.max_size.1 - header_height).max(common::row_height());
                 let scroll_to_selected = down || up;
 
-                if self.filtered.is_empty() && !self.query.is_empty() {
+                let has_entries = self.display.iter().any(|d| matches!(d, DisplayItem::Entry(_)));
+                if !has_entries && !self.query.is_empty() {
                     common::empty_state(ui);
                 } else {
-                    let filtered = &self.filtered;
+                    let display = &self.display;
                     let entries = &self.entries;
                     let query = &self.query;
 
-                    let vl_output = ScrollArea::vertical()
+                    let scroll_output = ScrollArea::vertical()
                         .id_salt("clip_list")
                         .max_height(list_height)
                         .show(ui, |ui: &mut Ui| {
                             let deleting = self.deleting;
                             let vl = virtual_list(
                                 ui,
-                                filtered.len(),
+                                display.len(),
                                 common::row_height(),
                                 self.selected,
                                 scroll_to_selected,
-                                false,
+                                true, // we handle selection highlight ourselves
                                 |ui, i, rect| {
-                                    let idx = filtered[i];
-                                    let e = &entries[idx];
-                                    let sel = i == self.selected;
-
-                                    // Fade + slide animation for deleting row
-                                    let (alpha, x_offset) = if let Some((del_i, t)) = deleting {
-                                        if i == del_i {
-                                            let progress = (t.elapsed().as_secs_f32() / 0.15).min(1.0);
-                                            (((1.0 - progress) * 255.0) as u8, -progress * 40.0)
-                                        } else { (255, 0.0) }
-                                    } else { (255, 0.0) };
-
-                                    let base_color = common::row_text_color(sel);
-                                    let text_color = egui::Color32::from_rgba_unmultiplied(
-                                        base_color.r(), base_color.g(), base_color.b(), alpha,
-                                    );
-
-                                    let rx = rect.min.x + x_offset;
-                                    let text_font = FontId::new(common::text_size(), FontFamily::Proportional);
-
-                                    // Right-aligned timestamp
-                                    let time_text = relative_time(e.last_used);
-                                    let time_font = FontId::new(common::text_size() * 0.8, FontFamily::Monospace);
-                                    let time_color = egui::Color32::from_rgba_unmultiplied(
-                                        colors::TEXT_SUBTITLE.r(), colors::TEXT_SUBTITLE.g(),
-                                        colors::TEXT_SUBTITLE.b(), alpha,
-                                    );
-                                    ui.painter().text(
-                                        egui::pos2(rect.max.x - 12.0, rect.min.y + (common::row_height() - common::text_size() * 0.8) / 2.0),
-                                        egui::Align2::RIGHT_TOP,
-                                        &time_text,
-                                        time_font,
-                                        time_color,
-                                    );
-
-                                    if e.is_image {
-                                        // Fixed square thumbnail container
-                                        let container_size = common::row_height() - 4.0;
-                                        let container_rect = egui::Rect::from_min_size(
-                                            egui::pos2(rx + 8.0, rect.min.y + 2.0),
-                                            egui::vec2(container_size, container_size),
-                                        );
-                                        ui.painter().rect_filled(container_rect, 2.0,
-                                            egui::Color32::from_rgba_premultiplied(13, 13, 13, alpha));
-
-                                        let row_tex = e.thumb.as_ref().or(e.texture.as_ref());
-                                        if let Some(tex) = row_tex {
-                                            let tex_size = tex.size_vec2();
-                                            let scale = (container_size / tex_size.x).min(container_size / tex_size.y);
-                                            let img_w = tex_size.x * scale;
-                                            let img_h = tex_size.y * scale;
-                                            let img_rect = egui::Rect::from_min_size(
-                                                egui::pos2(
-                                                    container_rect.min.x + (container_size - img_w) / 2.0,
-                                                    container_rect.min.y + (container_size - img_h) / 2.0,
-                                                ),
-                                                egui::vec2(img_w, img_h),
+                                    match display[i] {
+                                        DisplayItem::Header(label) => {
+                                            // Section header: label with subtle line
+                                            let font = FontId::new(common::text_size() * 0.8, FontFamily::Proportional);
+                                            let galley = ui.painter().layout_no_wrap(
+                                                label.to_string(), font.clone(), colors::TEXT_SUBTITLE,
                                             );
-                                            let tint = if sel {
-                                                egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha)
-                                            } else {
-                                                egui::Color32::from_rgba_unmultiplied(128, 128, 128, alpha)
-                                            };
-                                            ui.painter().image(
-                                                tex.id(), img_rect,
-                                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                                                tint,
+                                            let text_w = galley.size().x;
+                                            let y = rect.center().y;
+                                            ui.painter().galley(
+                                                egui::pos2(rect.min.x + 12.0, y - galley.size().y / 2.0),
+                                                galley,
+                                                colors::TEXT_SUBTITLE,
+                                            );
+                                            // Subtle line after label
+                                            ui.painter().line_segment(
+                                                [egui::pos2(rect.min.x + 12.0 + text_w + 8.0, y),
+                                                 egui::pos2(rect.max.x - 12.0, y)],
+                                                egui::Stroke::new(0.5, colors::TEXT_MUTED),
                                             );
                                         }
-                                        // Resolution text in monospace
-                                        let display_text = e.dims.map(|(w, h)| format!("{}×{}", w, h))
-                                            .unwrap_or_else(|| "image".into());
-                                        let mono_font = FontId::new(common::text_size() * 0.85, FontFamily::Monospace);
-                                        let text_x = rx + 8.0 + container_size + 8.0;
-                                        ui.painter().text(
-                                            egui::pos2(text_x, rect.min.y + (common::row_height() - common::text_size()) / 2.0),
-                                            egui::Align2::LEFT_TOP, &display_text, mono_font, text_color,
-                                        );
-                                    } else {
-                                        let display_text = truncate(&e.text, 70);
-                                        let text_pos = egui::pos2(
-                                            rx + 12.0,
-                                            rect.min.y + (common::row_height() - common::text_size()) / 2.0,
-                                        );
-                                        let highlight = colors::TEXT_PRIMARY;
-                                        let indices = common::match_indices(&display_text, query);
-                                        common::paint_highlighted(ui, text_pos, &display_text, &text_font, text_color, highlight, &indices);
+                                        DisplayItem::Entry(idx) => {
+                                            let e = &entries[idx];
+                                            let sel = i == self.selected;
+
+                                            // Selection highlight (since we use skip_selected_highlight)
+                                            if sel {
+                                                ui.painter().rect_filled(rect, 0.0, colors::BG_SELECTED);
+                                                let bar = egui::Rect::from_min_size(
+                                                    rect.left_top(),
+                                                    egui::vec2(colors::ACCENT_BAR, common::row_height()),
+                                                );
+                                                ui.painter().rect_filled(bar, 0.0, colors::ACCENT);
+                                            }
+
+                                            // Fade + slide animation for deleting row
+                                            let (alpha, x_offset) = if let Some((del_i, t)) = deleting {
+                                                if i == del_i {
+                                                    let progress = (t.elapsed().as_secs_f32() / 0.15).min(1.0);
+                                                    (((1.0 - progress) * 255.0) as u8, -progress * 40.0)
+                                                } else { (255, 0.0) }
+                                            } else { (255, 0.0) };
+
+                                            let base_color = common::row_text_color(sel);
+                                            let text_color = egui::Color32::from_rgba_unmultiplied(
+                                                base_color.r(), base_color.g(), base_color.b(), alpha,
+                                            );
+
+                                            let rx = rect.min.x + x_offset;
+                                            let text_font = FontId::new(common::text_size(), FontFamily::Proportional);
+                                            let content_y = rect.min.y + (common::row_height() - common::text_size()) / 2.0;
+
+                                            if e.is_image {
+                                                let container_size = common::row_height() - 4.0;
+                                                let container_rect = egui::Rect::from_min_size(
+                                                    egui::pos2(rx + 8.0, rect.min.y + 2.0),
+                                                    egui::vec2(container_size, container_size),
+                                                );
+                                                ui.painter().rect_filled(container_rect, 2.0,
+                                                    egui::Color32::from_rgba_premultiplied(13, 13, 13, alpha));
+
+                                                let row_tex = e.thumb.as_ref().or(e.texture.as_ref());
+                                                if let Some(tex) = row_tex {
+                                                    let tex_size = tex.size_vec2();
+                                                    let scale = (container_size / tex_size.x).min(container_size / tex_size.y);
+                                                    let img_w = tex_size.x * scale;
+                                                    let img_h = tex_size.y * scale;
+                                                    let img_rect = egui::Rect::from_min_size(
+                                                        egui::pos2(
+                                                            container_rect.min.x + (container_size - img_w) / 2.0,
+                                                            container_rect.min.y + (container_size - img_h) / 2.0,
+                                                        ),
+                                                        egui::vec2(img_w, img_h),
+                                                    );
+                                                    let tint = if sel {
+                                                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha)
+                                                    } else {
+                                                        egui::Color32::from_rgba_unmultiplied(128, 128, 128, alpha)
+                                                    };
+                                                    ui.painter().image(
+                                                        tex.id(), img_rect,
+                                                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                                        tint,
+                                                    );
+                                                }
+                                                let display_text = e.dims.map(|(w, h)| format!("{}×{}", w, h))
+                                                    .unwrap_or_else(|| "image".into());
+                                                let mono_font = FontId::new(common::text_size() * 0.85, FontFamily::Monospace);
+                                                let text_x = rx + 8.0 + container_size + 8.0;
+                                                ui.painter().text(
+                                                    egui::pos2(text_x, content_y),
+                                                    egui::Align2::LEFT_TOP, &display_text, mono_font, text_color,
+                                                );
+                                            } else {
+                                                let line = e.text.split('\n').next().unwrap_or(&e.text).trim_start();
+                                                let text_x = rx + 12.0;
+                                                let avail_w = rect.max.x - text_x - 12.0;
+                                                let text_pos = egui::pos2(text_x, content_y);
+                                                let indices = common::match_indices(line, query);
+
+                                                let base_fmt = egui::TextFormat { font_id: text_font.clone(), color: text_color, ..Default::default() };
+                                                let hl_fmt = egui::TextFormat {
+                                                    font_id: text_font.clone(),
+                                                    color: colors::ACCENT,
+                                                    underline: egui::Stroke::new(1.0, colors::ACCENT),
+                                                    ..Default::default()
+                                                };
+
+                                                let mut job = egui::text::LayoutJob::default();
+                                                if indices.is_empty() {
+                                                    job.append(line, 0.0, base_fmt);
+                                                } else {
+                                                    let mut last = 0;
+                                                    for &idx in &indices {
+                                                        if idx > last { job.append(&line[last..idx], 0.0, base_fmt.clone()); }
+                                                        let ch_len = line[idx..].chars().next().map_or(1, |c| c.len_utf8());
+                                                        job.append(&line[idx..idx + ch_len], 0.0, hl_fmt.clone());
+                                                        last = idx + ch_len;
+                                                    }
+                                                    if last < line.len() { job.append(&line[last..], 0.0, base_fmt); }
+                                                }
+                                                job.wrap = egui::text::TextWrapping {
+                                                    max_rows: 1,
+                                                    max_width: avail_w,
+                                                    overflow_character: Some('…'),
+                                                    break_anywhere: true,
+                                                };
+                                                let galley = ui.fonts(|f| f.layout_job(job));
+                                                ui.painter().galley(text_pos, galley, egui::Color32::TRANSPARENT);
+                                            }
+                                        }
                                     }
                                 },
                             );
                             vl
                         });
 
-                    if let Some(i) = vl_output.inner.clicked {
-                        self.selected = i;
-                        self.activate();
+                    common::paint_scroll_fade(ui, scroll_output.inner_rect, 16.0);
+
+                    if let Some(i) = scroll_output.inner.clicked {
+                        if matches!(display[i], DisplayItem::Entry(_)) {
+                            self.selected = i;
+                            self.activate();
+                        }
                     }
                 }
             });
