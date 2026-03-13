@@ -88,7 +88,7 @@ pub fn dispatch_batch_async(cmds: &[(&str, &str)]) {
 
 /// Subscribe to Hyprland IPC event socket.
 /// Calls `callback` for each event line. Reconnects on disconnect.
-pub fn subscribe_events(callback: impl Fn(&str) + Send + 'static) -> Option<thread::JoinHandle<()>> {
+pub fn subscribe_events(mut callback: impl FnMut(&str) + Send + 'static) -> Option<thread::JoinHandle<()>> {
     let sig = env::var("HYPRLAND_INSTANCE_SIGNATURE").ok()?;
     let runtime = env::var("XDG_RUNTIME_DIR").unwrap_or("/tmp".into());
     let path = format!("{}/hypr/{}/.socket2.sock", runtime, sig);
