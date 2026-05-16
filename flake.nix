@@ -88,6 +88,20 @@
         let
           cfg = config.services.launcher;
           launcherPkg = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+          # Overlay window rules, injected via `hyprctl eval`: the compositor
+          # runs a lua config and never reads hyprlang windowrules, so the
+          # rules are applied to the live lua state when the service starts.
+          hyprRules = cls: pkgs.writeShellScript "launcher-hypr-rules-${cls}" ''
+            [ -n "$HYPRLAND_INSTANCE_SIGNATURE" ] || exit 0
+            ${pkgs.hyprland}/bin/hyprctl eval '
+              hl.window_rule({ match = { class = "${cls}" }, workspace = "special:${cls} silent" });
+              hl.window_rule({ match = { class = "${cls}" }, float = true });
+              hl.window_rule({ match = { class = "${cls}" }, border_size = 0 });
+              hl.window_rule({ match = { class = "${cls}" }, no_shadow = true });
+              hl.window_rule({ match = { class = "${cls}" }, move = { "monitor_w/2-window_w/2", "monitor_h*0.236" } });
+            ' || true
+            exit 0
+          '';
         in {
           options.services.launcher = {
             enable = lib.mkEnableOption "launcher service";
@@ -95,18 +109,6 @@
 
           config = lib.mkIf cfg.enable {
             environment.systemPackages = [ launcherPkg ];
-
-            home-manager.sharedModules = lib.optional config.programs.hyprland.enable {
-              wayland.windowManager.hyprland.extraConfig = let
-                rules = cls: ''
-                  windowrule = workspace special:${cls} silent, match:class ${cls}
-                  windowrule = float on, match:class ${cls}
-                  windowrule = border_size 0, match:class ${cls}
-                  windowrule = no_shadow on, match:class ${cls}
-                  windowrule = move (monitor_w/2-window_w/2) (monitor_h*0.236), match:class ${cls}
-                '';
-              in rules "launcher" + rules "clipboard";
-            };
 
             systemd.user.services.launcher = {
               description = "Launcher (eframe)";
@@ -117,6 +119,7 @@
                 GIO_EXTRA_MODULES = "${pkgs.dconf.lib}/lib/gio/modules:${pkgs.glib-networking}/lib/gio/modules";
               };
               serviceConfig = {
+                ExecStartPre = "${hyprRules "launcher"}";
                 ExecStart = "${launcherPkg}/bin/launcher";
                 Restart = "on-failure";
                 RestartSec = 2;
@@ -130,6 +133,7 @@
               partOf = [ "hyprland-session.target" ];
               path = [ pkgs.hyprland pkgs.wl-clipboard ];
               serviceConfig = {
+                ExecStartPre = "${hyprRules "clipboard"}";
                 ExecStart = "${launcherPkg}/bin/clipboard";
                 Restart = "on-failure";
                 RestartSec = 2;
