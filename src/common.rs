@@ -521,6 +521,15 @@ pub fn clip_display_line(s: &str) -> String {
     out
 }
 
+/// Whether the MIME label should be rendered next to a clipboard row's
+/// metadata. Common defaults (plain text, common image types, uri lists)
+/// are obvious from the content itself and add noise; anything else carries
+/// real information.
+pub fn should_show_mime_label(mime: &str) -> bool {
+    let base = mime.split(';').next().unwrap_or(mime).trim();
+    !matches!(base, "text/plain" | "image/png" | "image/jpeg" | "text/uri-list")
+}
+
 /// Workspace chip colors — sharp 18x18 square with the workspace number
 /// centered inside. Background is a subtle elevated-surface gray, foreground
 /// a warm off-white. No gold accent (reserved for window-focus signaling).

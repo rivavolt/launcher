@@ -415,10 +415,13 @@ impl App {
                                     ui.painter().galley(rect.min, galley, colors::TEXT_PRIMARY);
                                 }
 
-                                // Metadata line
+                                // Metadata line — hide obvious-default MIME types
                                 ui.add_space(8.0);
                                 let meta_font = FontId::new(common::text_size() * 0.75, FontFamily::Monospace);
-                                let mut parts = vec![e.mime.as_str()];
+                                let mut parts: Vec<&str> = Vec::new();
+                                if common::should_show_mime_label(&e.mime) {
+                                    parts.push(e.mime.as_str());
+                                }
                                 if let Some(app) = &e.source_app {
                                     parts.push(app.as_str());
                                 }
