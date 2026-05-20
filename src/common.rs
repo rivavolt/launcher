@@ -27,7 +27,8 @@ pub fn font_family() -> &'static str {
     })
 }
 
-pub fn input_size() -> f32 { text_size() * 1.35 }
+/// Input/query field font size — sits 2pt above row text for focal weight.
+pub fn input_size() -> f32 { 18.0 }
 pub fn row_height() -> f32 { (text_size() * 1.5).round() }
 /// Icon/prompt container: square area for row icons and the input `>` glyph
 pub fn icon_container() -> f32 { (text_size() * 1.5).round() + 4.0 }
