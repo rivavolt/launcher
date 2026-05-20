@@ -91,16 +91,44 @@
           # Overlay window rules, injected via `hyprctl eval`: the compositor
           # runs a lua config and never reads hyprlang windowrules, so the
           # rules are applied to the live lua state when the service starts.
+          # Also re-applied by launcher-hypr-watcher whenever Hyprland emits
+          # configreloaded, since hyprctl reload rebuilds the rule list from
+          # the persistent Lua config and would otherwise drop these.
           hyprRules = cls: pkgs.writeShellScript "launcher-hypr-rules-${cls}" ''
             [ -n "$HYPRLAND_INSTANCE_SIGNATURE" ] || exit 0
             ${pkgs.hyprland}/bin/hyprctl eval '
               hl.window_rule({ match = { class = "${cls}" }, workspace = "special:${cls} silent" });
               hl.window_rule({ match = { class = "${cls}" }, float = true });
-              hl.window_rule({ match = { class = "${cls}" }, border_size = 0 });
+              hl.window_rule({ match = { class = "${cls}" }, border_size = 1 });
+              hl.window_rule({ match = { class = "${cls}" }, border_color = "rgba(c8a03cff) rgba(c8a03cff)" });
+              hl.window_rule({ match = { class = "${cls}" }, rounding = 5 });
               hl.window_rule({ match = { class = "${cls}" }, no_shadow = true });
               hl.window_rule({ match = { class = "${cls}" }, move = { "monitor_w/2-window_w/2", "monitor_h*0.236" } });
             ' || true
             exit 0
+          '';
+          # Watcher: subscribes to Hyprland's event socket and re-runs the
+          # rule injection scripts when the compositor reloads its config.
+          # Without this, every `hyprctl reload` would wipe the runtime-
+          # injected rules and the launcher window would drop to tiled.
+          hyprWatcher = pkgs.writeShellScript "launcher-hypr-watcher" ''
+            [ -n "$HYPRLAND_INSTANCE_SIGNATURE" ] || exit 0
+            SOCK="''${XDG_RUNTIME_DIR}/hypr/''${HYPRLAND_INSTANCE_SIGNATURE}/.socket2.sock"
+            # Wait for the event socket to exist (Hyprland may still be starting).
+            for _ in $(seq 1 30); do
+              [ -S "$SOCK" ] && break
+              sleep 0.2
+            done
+            [ -S "$SOCK" ] || exit 0
+            # Stream events; re-apply rules on configreloaded.
+            ${pkgs.socat}/bin/socat -U - UNIX-CONNECT:"$SOCK" | while IFS= read -r line; do
+              case "$line" in
+                configreloaded*)
+                  ${hyprRules "launcher"} || true
+                  ${hyprRules "clipboard"} || true
+                  ;;
+              esac
+            done
           '';
         in {
           options.services.launcher = {
@@ -150,6 +178,18 @@
                 Restart = "on-failure";
                 RestartSec = 2;
                 PassEnvironment = "HYPRLAND_INSTANCE_SIGNATURE XDG_RUNTIME_DIR WAYLAND_DISPLAY XDG_CACHE_HOME HOME";
+              };
+            };
+
+            systemd.user.services.launcher-hypr-watcher = {
+              description = "Re-inject launcher/clipboard Hyprland rules on configreloaded";
+              wantedBy = [ "hyprland-session.target" ];
+              partOf = [ "hyprland-session.target" ];
+              serviceConfig = {
+                ExecStart = "${hyprWatcher}";
+                Restart = "on-failure";
+                RestartSec = 2;
+                PassEnvironment = "HYPRLAND_INSTANCE_SIGNATURE XDG_RUNTIME_DIR HOME";
               };
             };
           };
