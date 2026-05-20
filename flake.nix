@@ -88,14 +88,20 @@
         let
           cfg = config.services.launcher;
           launcherPkg = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
-          # Window rules (workspace, float, border, rounding, position) are
-          # owned by the host's Hyprland Lua config, not this module —
-          # compositor styling belongs with the compositor. Previously we
-          # injected them here via `hyprctl eval` in ExecStartPre, but
-          # `hyprctl reload` re-reads the persistent Lua config and discards
-          # any runtime-injected rules, leaving the launcher tiled until the
-          # service restarted. Living in the host config means they survive
-          # reloads. See nixos-config:linux/hyprland/launcher-settings.lua.
+          # Overlay window rules, injected via `hyprctl eval`: the compositor
+          # runs a lua config and never reads hyprlang windowrules, so the
+          # rules are applied to the live lua state when the service starts.
+          hyprRules = cls: pkgs.writeShellScript "launcher-hypr-rules-${cls}" ''
+            [ -n "$HYPRLAND_INSTANCE_SIGNATURE" ] || exit 0
+            ${pkgs.hyprland}/bin/hyprctl eval '
+              hl.window_rule({ match = { class = "${cls}" }, workspace = "special:${cls} silent" });
+              hl.window_rule({ match = { class = "${cls}" }, float = true });
+              hl.window_rule({ match = { class = "${cls}" }, border_size = 0 });
+              hl.window_rule({ match = { class = "${cls}" }, no_shadow = true });
+              hl.window_rule({ match = { class = "${cls}" }, move = { "monitor_w/2-window_w/2", "monitor_h*0.236" } });
+            ' || true
+            exit 0
+          '';
         in {
           options.services.launcher = {
             enable = lib.mkEnableOption "launcher service";
@@ -113,6 +119,7 @@
                 GIO_EXTRA_MODULES = "${pkgs.dconf.lib}/lib/gio/modules:${pkgs.glib-networking}/lib/gio/modules";
               };
               serviceConfig = {
+                ExecStartPre = "${hyprRules "launcher"}";
                 ExecStart = "${launcherPkg}/bin/launcher";
                 Restart = "on-failure";
                 RestartSec = 2;
@@ -126,6 +133,7 @@
               partOf = [ "hyprland-session.target" ];
               path = [ pkgs.hyprland pkgs.wl-clipboard ];
               serviceConfig = {
+                ExecStartPre = "${hyprRules "clipboard"}";
                 ExecStart = "${launcherPkg}/bin/clipboard";
                 Restart = "on-failure";
                 RestartSec = 2;
