@@ -33,6 +33,9 @@ pub fn row_height() -> f32 { (text_size() * 1.5).round() }
 /// Icon/prompt container: square area for row icons and the input `>` glyph
 pub fn icon_container() -> f32 { (text_size() * 1.5).round() + 4.0 }
 
+/// Outer popup corner radius — the single intentionally-rounded element.
+pub const POPUP_RADIUS: u8 = 5;
+
 // Key repeat timing
 pub const REPEAT_DELAY_MS: u128 = 300;
 pub const REPEAT_INTERVAL_MS: u128 = 120;
@@ -54,22 +57,24 @@ pub mod colors {
     pub const ACCENT_BAR: f32 = 1.5;
 }
 
-/// Panel frame with semi-transparent dark background
+/// Panel frame with semi-transparent dark background.
+/// Bottom corners rounded so the outer popup reads as a single 5px-radius shape
+/// (the input frame on top supplies the matching top corners).
 pub fn panel_frame() -> Frame {
     Frame {
         fill: colors::BG_BASE,
-        corner_radius: egui::CornerRadius::ZERO,
+        corner_radius: egui::CornerRadius { nw: 0, ne: 0, sw: POPUP_RADIUS, se: POPUP_RADIUS },
         ..Frame::NONE
     }
 }
 
-/// Input field frame — tight padding
+/// Input field frame — tight padding, top corners rounded to match panel_frame.
 pub fn input_frame() -> Frame {
     Frame {
         fill: colors::BG_INPUT,
         inner_margin: egui::Margin::symmetric(8, 7),
         outer_margin: egui::Margin { bottom: 0, ..Default::default() },
-        corner_radius: egui::CornerRadius::ZERO,
+        corner_radius: egui::CornerRadius { nw: POPUP_RADIUS, ne: POPUP_RADIUS, sw: 0, se: 0 },
         ..Frame::NONE
     }
 }
