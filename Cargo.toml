@@ -38,6 +38,7 @@ wayland-clipboard-listener = { version = "0.6", features = ["wlr-data-control"] 
 imagesize = "0.13"
 fnv = "1"
 dirs = "6"
+if-addrs = "0.15"
 
 [profile.release]
 lto = "thin"

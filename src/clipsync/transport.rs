@@ -14,8 +14,8 @@
 //! and lets the DB observer push a `Have` at any time by sending on the channel.
 //!
 //! ## Binding
-//! The listener binds to the host's Tailscale IPv4 only — never `0.0.0.0` — so
-//! the sync port is reachable solely over the tailnet.
+//! The listener binds to the `tailscale0` interface's IPv4 only — never
+//! `0.0.0.0` — so the sync port is reachable solely over the tailnet.
 
 use crate::clip::db::ClipboardDb;
 use crate::clipsync::db_observer::{DbObserver, POLL_INTERVAL};
@@ -66,7 +66,14 @@ pub fn run(cfg: Config) -> ! {
 
 /// Server role: accept one peer connection at a time and service it.
 fn run_server(cfg: Config) -> ! {
-    let bind_ip = wait_for_tailscale_ip();
+    let bind_ip = match tailscale_ipv4() {
+        Ok(ip) => ip,
+        Err(e) => {
+            eprintln!("[clip-sync] cannot bind listener: {e}");
+            std::process::exit(1);
+        }
+    };
+    eprintln!("[clip-sync] bound to tailscale0 address {bind_ip}");
     let addr = SocketAddr::new(bind_ip, SYNC_PORT);
 
     loop {
@@ -354,50 +361,39 @@ fn apply_to_clipboard(entry: &crate::clipsync::protocol::WireEntry) {
     }
 }
 
-/// Block until the host has a Tailscale IPv4, then return it.
-///
-/// On boot the sync daemon may start before tailscaled has assigned an address;
-/// rather than fail, it waits. The address is the CGNAT range Tailscale uses
-/// (100.64.0.0/10).
-fn wait_for_tailscale_ip() -> IpAddr {
-    let mut warned = false;
-    loop {
-        if let Some(ip) = tailscale_ipv4() {
-            eprintln!("[clip-sync] bound to tailscale address {ip}");
-            return ip;
-        }
-        if !warned {
-            eprintln!("[clip-sync] waiting for a tailscale0 IPv4 address...");
-            warned = true;
-        }
-        thread::sleep(Duration::from_secs(2));
-    }
-}
+/// Name of the Tailscale interface, identical on every host the daemon runs on.
+const TAILSCALE_IFACE: &str = "tailscale0";
 
-/// True for an address in Tailscale's CGNAT range, 100.64.0.0/10.
-fn is_tailscale_v4(v4: &std::net::Ipv4Addr) -> bool {
-    let o = v4.octets();
-    o[0] == 100 && (o[1] & 0xC0) == 0x40
-}
-
-/// Find this host's Tailscale IPv4, without depending on the `tailscale` CLI.
+/// Find this host's Tailscale IPv4 by interface name.
 ///
-/// The reliable signal is the kernel's routing decision: a UDP socket
-/// `connect`ed to an address in the tailnet does not send anything, but binds
-/// the socket to the source address the kernel would route from — the
-/// `tailscale0` address. `local_addr()` then reads it back.
+/// Enumerates the host's interfaces and returns the IPv4 bound to `tailscale0`.
+/// This is exact — no routing heuristic, no CGNAT-range guess — and depends
+/// only on the kernel's interface table, not the `tailscale` CLI.
 ///
-/// `connect` targets the Magic DNS resolver (100.100.100.100): it is always a
-/// tailnet address routing-wise, so this works even before the peer is up.
-/// If tailscaled has not assigned an address yet the source will not be in the
-/// CGNAT range and we report `None` so the caller keeps waiting.
-fn tailscale_ipv4() -> Option<IpAddr> {
-    let probe = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    probe.connect("100.100.100.100:9").ok()?;
-    match probe.local_addr().ok()?.ip() {
-        IpAddr::V4(v4) if is_tailscale_v4(&v4) => Some(IpAddr::V4(v4)),
-        _ => None,
+/// Errors (rather than waiting or falling back) when `tailscale0` is absent or
+/// has no IPv4: Tailscale is not up, and the daemon cannot function off the
+/// tailnet anyway, so the listener must never land on `0.0.0.0`.
+fn tailscale_ipv4() -> std::io::Result<IpAddr> {
+    let ifaces = if_addrs::get_if_addrs()?;
+    let mut iface_present = false;
+    for iface in &ifaces {
+        if iface.name != TAILSCALE_IFACE {
+            continue;
+        }
+        iface_present = true;
+        if let IpAddr::V4(v4) = iface.ip() {
+            return Ok(IpAddr::V4(v4));
+        }
     }
+    let detail = if iface_present {
+        format!("interface '{TAILSCALE_IFACE}' has no IPv4 address")
+    } else {
+        format!("interface '{TAILSCALE_IFACE}' not found")
+    };
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AddrNotAvailable,
+        format!("{detail} — is Tailscale up?"),
+    ))
 }
 
 /// This machine's hostname, lowercased to match Tailscale's naming.
