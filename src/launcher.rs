@@ -117,7 +117,10 @@ struct App {
     filtered: Vec<usize>,
     selected: usize,
     should_hide: bool,
-    activated_window: bool,
+    /// Set once `special:launcher` has already been dismissed as part of
+    /// activating an entry (focusing a window, or spawning an app). Tells
+    /// `hide_and_reset` not to toggle the special workspace a second time.
+    dismissed_special: bool,
     loaded: bool,
     was_focused: bool,
     held_key: Option<(egui::Key, std::time::Instant)>,
@@ -147,7 +150,7 @@ impl App {
             filtered: Vec::new(),
             selected: 0,
             should_hide: false,
-            activated_window: false,
+            dismissed_special: false,
             loaded: false,
             was_focused: false,
             held_key: None,
@@ -374,6 +377,16 @@ impl App {
                 Entry::Desktop { exec, terminal, .. } => {
                     let parts = desktop::parse_exec(exec);
                     if let Some((bin, args)) = parts.split_first() {
+                        // Dismiss `special:launcher` *before* spawning. The
+                        // launcher window lives on the special workspace, so
+                        // while it is shown the special workspace is the
+                        // active one — a window mapped now would land there.
+                        // Toggle it off synchronously so the user's real
+                        // workspace is active by the time the app maps; an
+                        // async toggle would race the spawn and the new
+                        // window would still appear on special:launcher.
+                        hyprland::dispatch(r#"hl.dsp.workspace.toggle_special("launcher")"#);
+                        self.dismissed_special = true;
                         if *terminal {
                             let term = env::var("TERMINAL").unwrap_or("kitty".into());
                             let term_bin = term.split_whitespace().next().unwrap_or("kitty");
@@ -396,7 +409,7 @@ impl App {
                 }
                 Entry::Window { address, .. } => {
                     hyprland::dispatch(&format!(r#"hl.dsp.focus({{ window = "address:{address}" }})"#));
-                    self.activated_window = true;
+                    self.dismissed_special = true;
                 }
             }
         }
@@ -411,10 +424,10 @@ impl App {
         self.selected = 0;
         self.filtered = self.default_order();
         self.should_hide = false;
-        if !self.activated_window {
+        if !self.dismissed_special {
             hyprland::dispatch_async(r#"hl.dsp.workspace.toggle_special("launcher")"#);
         }
-        self.activated_window = false;
+        self.dismissed_special = false;
     }
 
     fn render(&mut self, ctx: &Context) {
