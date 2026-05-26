@@ -136,6 +136,14 @@ struct App {
     ghost_text_cache: String,
     display_names: HashMap<usize, String>,
     last_content_width: f32,
+    /// Icon textures keyed by source path. Each `load_entries` call would
+    /// otherwise re-upload the same ~200 icons via `ctx.load_texture` (which
+    /// always allocates a fresh GPU texture — there is no by-name caching
+    /// inside egui), and dropping the old `TextureHandle`s only queues the
+    /// frees for the next frame, so rapid reloads overlap two full sets of
+    /// textures. Persisting handles here means the GPU set stays bounded by
+    /// the installed-app count.
+    icon_cache: HashMap<PathBuf, egui::TextureHandle>,
 }
 
 impl App {
@@ -165,6 +173,7 @@ impl App {
             ghost_text_cache: String::new(),
             display_names: HashMap::new(),
             last_content_width: 0.0,
+            icon_cache: HashMap::new(),
         }
     }
 
@@ -177,11 +186,17 @@ impl App {
         let mut focused_at: f64 = 0.0;
 
         self._hypr_thread = hyprland::subscribe_events(move |line| {
-            if line.starts_with("openwindow>>") || line.starts_with("closewindow>>") {
+            // Only window list changes warrant a reload — title changes fire
+            // constantly (every browser tab switch, every terminal prompt) and
+            // load_entries is heavy. Stale titles on Window entries are a
+            // minor display issue; reloading on every title change was the
+            // driver of unbounded memory growth.
+            if line.starts_with("openwindow>>")
+                || line.starts_with("closewindow>>")
+                || line.starts_with("movewindow>>")
+            {
                 needs_reload.store(true, Ordering::SeqCst);
                 ctx.request_repaint();
-            } else if line.starts_with("windowtitle>>") || line.starts_with("movewindow>>") {
-                needs_reload.store(true, Ordering::SeqCst);
             } else if let Some(rest) = line.strip_prefix("activewindow>>") {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -213,12 +228,83 @@ impl App {
         let desktop_entries = desktop::collect_entries();
         let wmclass_icons = desktop::wmclass_icon_map(&desktop_entries, &icon_index);
 
-        self.entries = collect_hyprland_windows(ctx, &icon_index, &wmclass_icons);
-        self.entries.extend(convert_desktop_entries(ctx, &icon_index, desktop_entries));
+        self.entries = self.collect_hyprland_windows(ctx, &icon_index, &wmclass_icons);
+        let new_desktop = self.convert_desktop_entries(ctx, &icon_index, desktop_entries);
+        self.entries.extend(new_desktop);
 
         self.filter();
         self.selected = old_selected.min(self.filtered.len().saturating_sub(1));
         self.loaded = true;
+    }
+
+    /// Return a handle to the texture for `path`, loading it on first use.
+    /// Bounded by the installed-app count; no eviction needed.
+    fn icon_for(&mut self, ctx: &Context, path: &PathBuf) -> Option<egui::TextureHandle> {
+        if let Some(tex) = self.icon_cache.get(path) {
+            return Some(tex.clone());
+        }
+        let tex = load_icon(ctx, path)?;
+        self.icon_cache.insert(path.clone(), tex.clone());
+        Some(tex)
+    }
+
+    fn collect_hyprland_windows(
+        &mut self,
+        ctx: &Context,
+        icon_index: &HashMap<String, PathBuf>,
+        wmclass_icons: &HashMap<String, PathBuf>,
+    ) -> Vec<Entry> {
+        hyprland::clients()
+            .into_iter()
+            .filter(|c| !c.class.is_empty() && c.class != "launcher")
+            .filter(|c| !c.workspace.name.starts_with("special:"))
+            .filter(|c| !c.pinned)
+            .map(|c| {
+                let class_lower = c.class.to_lowercase();
+                let icon_path = wmclass_icons.get(&class_lower)
+                    .or_else(|| icon_index.get(&class_lower))
+                    .cloned();
+                let icon = icon_path.and_then(|p| self.icon_for(ctx, &p));
+                let workspace = if c.workspace.id > 0 {
+                    c.workspace.id.to_string()
+                } else {
+                    c.workspace.name.clone()
+                };
+                Entry::Window {
+                    title: c.title,
+                    class: c.class,
+                    address: c.address,
+                    workspace,
+                    icon,
+                }
+            })
+            .collect()
+    }
+
+    fn convert_desktop_entries(
+        &mut self,
+        ctx: &Context,
+        icon_index: &HashMap<String, PathBuf>,
+        entries: Vec<desktop::DesktopEntry>,
+    ) -> Vec<Entry> {
+        entries
+            .into_iter()
+            .map(|de| {
+                let icon_path = de.icon.as_ref().and_then(|i| i.resolve(icon_index));
+                let icon = icon_path.and_then(|p| self.icon_for(ctx, &p));
+                let mut keywords = de.keywords;
+                if let Some(gn) = de.generic_name {
+                    keywords.push(gn);
+                }
+                Entry::Desktop {
+                    name: de.name,
+                    exec: de.exec,
+                    terminal: de.terminal,
+                    icon,
+                    keywords,
+                }
+            })
+            .collect()
     }
 
     fn default_order(&self) -> Vec<usize> {
@@ -700,51 +786,3 @@ fn load_icon(ctx: &Context, path: &PathBuf) -> Option<egui::TextureHandle> {
     ))
 }
 
-fn collect_hyprland_windows(ctx: &Context, icon_index: &HashMap<String, PathBuf>, wmclass_icons: &HashMap<String, PathBuf>) -> Vec<Entry> {
-    hyprland::clients()
-        .into_iter()
-        .filter(|c| !c.class.is_empty() && c.class != "launcher")
-        .filter(|c| !c.workspace.name.starts_with("special:"))
-        .filter(|c| !c.pinned)
-        .map(|c| {
-            let class_lower = c.class.to_lowercase();
-            let icon_path = wmclass_icons.get(&class_lower)
-                .or_else(|| icon_index.get(&class_lower));
-            let icon = icon_path.and_then(|p| load_icon(ctx, p));
-            let workspace = if c.workspace.id > 0 {
-                c.workspace.id.to_string()
-            } else {
-                c.workspace.name.clone()
-            };
-            Entry::Window {
-                title: c.title,
-                class: c.class,
-                address: c.address,
-                workspace,
-                icon,
-            }
-        })
-        .collect()
-}
-
-fn convert_desktop_entries(ctx: &Context, icon_index: &HashMap<String, PathBuf>, entries: Vec<desktop::DesktopEntry>) -> Vec<Entry> {
-    entries
-        .into_iter()
-        .map(|de| {
-            let icon = de.icon.as_ref()
-                .and_then(|i| i.resolve(icon_index))
-                .and_then(|p| load_icon(ctx, &p));
-            let mut keywords = de.keywords;
-            if let Some(gn) = de.generic_name {
-                keywords.push(gn);
-            }
-            Entry::Desktop {
-                name: de.name,
-                exec: de.exec,
-                terminal: de.terminal,
-                icon,
-                keywords,
-            }
-        })
-        .collect()
-}
