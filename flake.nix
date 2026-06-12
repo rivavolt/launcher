@@ -88,74 +88,22 @@
         let
           cfg = config.services.launcher;
           launcherPkg = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
-          # Derive HYPRLAND_INSTANCE_SIGNATURE from the live socket directory
-          # instead of trusting the env var. UWSM is unreliable about importing
-          # the var into the systemd-user manager's environment, so PassEnvironment
-          # often delivers nothing — on such hosts every rule injection below
-          # silently no-ops and the windows drop to tiled. The live instance is
-          # the dir under $XDG_RUNTIME_DIR/hypr/ holding both .socket.sock and
-          # .socket2.sock; its basename is the signature.
-          resolveHyprSig = ''
-            if [ -z "''${HYPRLAND_INSTANCE_SIGNATURE:-}" ] \
-               || [ ! -S "''${XDG_RUNTIME_DIR}/hypr/''${HYPRLAND_INSTANCE_SIGNATURE}/.socket2.sock" ]; then
-              for _d in "''${XDG_RUNTIME_DIR}/hypr/"*/; do
-                if [ -S "''${_d}.socket.sock" ] && [ -S "''${_d}.socket2.sock" ]; then
-                  _d="''${_d%/}"
-                  HYPRLAND_INSTANCE_SIGNATURE="''${_d##*/}"
-                  export HYPRLAND_INSTANCE_SIGNATURE
-                  break
-                fi
-              done
-            fi
-          '';
-          # Overlay window rules, injected via `hyprctl eval`: the compositor
-          # runs a lua config and never reads hyprlang windowrules, so the
-          # rules are applied to the live lua state when the service starts.
-          # Also re-applied by launcher-hypr-watcher whenever Hyprland emits
-          # configreloaded, since hyprctl reload rebuilds the rule list from
-          # the persistent Lua config and would otherwise drop these.
-          hyprRules = cls: pkgs.writeShellScript "launcher-hypr-rules-${cls}" ''
-            ${resolveHyprSig}
-            [ -n "''${HYPRLAND_INSTANCE_SIGNATURE:-}" ] || exit 0
-            ${pkgs.hyprland}/bin/hyprctl eval '
-              hl.window_rule({ match = { class = "${cls}" }, workspace = "special:${cls} silent" });
-              hl.window_rule({ match = { class = "${cls}" }, float = true });
-              hl.window_rule({ match = { class = "${cls}" }, border_size = 1 });
-              hl.window_rule({ match = { class = "${cls}" }, border_color = "rgba(c8a03cff) rgba(c8a03cff)" });
-              hl.window_rule({ match = { class = "${cls}" }, rounding = 5 });
-              hl.window_rule({ match = { class = "${cls}" }, no_shadow = true });
-              hl.window_rule({ match = { class = "${cls}" }, move = { "monitor_w/2-window_w/2", "monitor_h*0.236" } });
-            ' || true
-            exit 0
-          '';
-          # Watcher: subscribes to Hyprland's event socket and re-runs the
-          # rule injection scripts when the compositor reloads its config.
-          # Without this, every `hyprctl reload` would wipe the runtime-
-          # injected rules and the launcher window would drop to tiled.
-          hyprWatcher = pkgs.writeShellScript "launcher-hypr-watcher" ''
-            # Wait for the event socket to exist (Hyprland may still be starting),
-            # re-resolving the signature each pass — UWSM may not have populated
-            # the env var yet, or at all.
-            SOCK=""
-            for _ in $(seq 1 30); do
-              ${resolveHyprSig}
-              if [ -n "''${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
-                SOCK="''${XDG_RUNTIME_DIR}/hypr/''${HYPRLAND_INSTANCE_SIGNATURE}/.socket2.sock"
-                [ -S "$SOCK" ] && break
-              fi
-              sleep 0.2
-            done
-            [ -n "$SOCK" ] && [ -S "$SOCK" ] || exit 0
-            # Stream events; re-apply rules on configreloaded.
-            ${pkgs.socat}/bin/socat -U - UNIX-CONNECT:"$SOCK" | while IFS= read -r line; do
-              case "$line" in
-                configreloaded*)
-                  ${hyprRules "launcher"} || true
-                  ${hyprRules "clipboard"} || true
-                  ;;
-              esac
-            done
-          '';
+          # The launcher and clipboard are now wlr-layer-shell overlays (see
+          # src/layer.rs), so they need none of the old per-class Hyprland
+          # window rules. The overlay layer, top anchor + centering, gold
+          # border and rounded corners are all properties of the layer surface
+          # the app creates — there is no managed window to force onto a special
+          # workspace, float, border, round, or move. That retires the entire
+          # `hyprctl eval` rule-injection dance (and its UWSM-signature
+          # resolution and the configreloaded re-injection watcher) that the
+          # eframe-window approach depended on.
+          #
+          # Show/hide is now surface map/unmap driven by SIGUSR1: the daemons
+          # idle until signalled, pop up, and dismiss on Escape / activation /
+          # focus loss. The show keybind must therefore send the signal
+          # (`pkill -USR1 launcher` / `pkill -USR1 clipboard`) instead of
+          # toggling a special workspace — that binding lives in the Hyprland
+          # config (nixos-config), out of this flake.
         in {
           options.services.launcher = {
             enable = lib.mkEnableOption "launcher service";
@@ -165,7 +113,7 @@
             environment.systemPackages = [ launcherPkg ];
 
             systemd.user.services.launcher = {
-              description = "Launcher (eframe)";
+              description = "Launcher (wlr-layer-shell overlay)";
               wantedBy = [ "hyprland-session.target" ];
               partOf = [ "hyprland-session.target" ];
               path = lib.mkForce [];
@@ -173,7 +121,11 @@
                 GIO_EXTRA_MODULES = "${pkgs.dconf.lib}/lib/gio/modules:${pkgs.glib-networking}/lib/gio/modules";
               };
               serviceConfig = {
-                ExecStartPre = "${hyprRules "launcher"}";
+                # No ExecStartPre rule injection: a layer surface needs no
+                # window rules. The daemon idles until SIGUSR1 (the show
+                # keybind), then maps its overlay. hyprctl (for the client
+                # list / focus dispatch / event subscription) comes from the
+                # inherited PATH below.
                 ExecStart = "${launcherPkg}/bin/launcher";
                 Restart = "on-failure";
                 RestartSec = 2;
@@ -182,12 +134,11 @@
             };
 
             systemd.user.services.clipboard = {
-              description = "Clipboard (eframe)";
+              description = "Clipboard (wlr-layer-shell overlay)";
               wantedBy = [ "hyprland-session.target" ];
               partOf = [ "hyprland-session.target" ];
               path = [ pkgs.hyprland pkgs.wl-clipboard ];
               serviceConfig = {
-                ExecStartPre = "${hyprRules "clipboard"}";
                 ExecStart = "${launcherPkg}/bin/clipboard";
                 Restart = "on-failure";
                 RestartSec = 2;
@@ -207,18 +158,6 @@
                 Restart = "on-failure";
                 RestartSec = 2;
                 PassEnvironment = "HYPRLAND_INSTANCE_SIGNATURE XDG_RUNTIME_DIR WAYLAND_DISPLAY XDG_CACHE_HOME HOME";
-              };
-            };
-
-            systemd.user.services.launcher-hypr-watcher = {
-              description = "Re-inject launcher/clipboard Hyprland rules on configreloaded";
-              wantedBy = [ "hyprland-session.target" ];
-              partOf = [ "hyprland-session.target" ];
-              serviceConfig = {
-                ExecStart = "${hyprWatcher}";
-                Restart = "on-failure";
-                RestartSec = 2;
-                PassEnvironment = "HYPRLAND_INSTANCE_SIGNATURE XDG_RUNTIME_DIR HOME";
               };
             };
           };

@@ -68,6 +68,28 @@ pub fn panel_frame() -> Frame {
     }
 }
 
+/// Paint the 1px gold outline + 5px rounded corners around the whole surface.
+///
+/// On the old eframe path Hyprland's window rules drew this border
+/// (`border_size = 1`, `border_color = rgba(c8a03cff)`, `rounding = 5`). A
+/// layer-shell surface has no server-side decorations, so the app draws it
+/// itself: a single-pixel ACCENT stroke on a `POPUP_RADIUS`-rounded rect
+/// covering `screen_rect`. The rect is inset half a pixel so the full stroke
+/// width lands inside the surface instead of being clipped at the edge.
+pub fn popup_border(ctx: &egui::Context) {
+    let inset = ctx.content_rect().shrink(0.5);
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("popup_border"),
+    ));
+    painter.rect_stroke(
+        inset,
+        egui::CornerRadius::same(POPUP_RADIUS),
+        egui::Stroke::new(1.0, colors::ACCENT),
+        egui::StrokeKind::Inside,
+    );
+}
+
 /// Input field frame — tight padding, top corners rounded to match panel_frame.
 pub fn input_frame() -> Frame {
     Frame {
@@ -159,7 +181,7 @@ pub fn input_panel(
                         color: colors::GHOST_TEXT,
                         ..Default::default()
                     });
-                    let galley = ui.fonts(|f| f.layout_job(job));
+                    let galley = ui.fonts_mut(|f| f.layout_job(job));
                     ui.painter().galley(output.galley_pos, galley, Color32::TRANSPARENT);
                 }
             }
@@ -363,8 +385,10 @@ pub fn handle_navigation_keys(
     (down, up)
 }
 
-/// Configure style on the egui context
-pub fn setup_transparent_style(cc: &eframe::CreationContext) {
+/// Configure the shared transparent style + Inter font on an egui context.
+/// Takes a bare `egui::Context` so it works under both eframe (picker) and the
+/// wayapp layer-shell harness (launcher, clipboard).
+pub fn setup_transparent_style(ctx: &egui::Context) {
     let mut style = egui::Style::default();
     style.visuals.window_fill = egui::Color32::TRANSPARENT;
     style.visuals.panel_fill = egui::Color32::TRANSPARENT;
@@ -374,7 +398,7 @@ pub fn setup_transparent_style(cc: &eframe::CreationContext) {
     style.visuals.widgets.inactive.bg_fill = egui::Color32::from_rgba_premultiplied(40, 40, 40, 40);
     style.visuals.widgets.hovered.bg_fill = egui::Color32::from_rgba_premultiplied(60, 60, 60, 80);
     style.visuals.widgets.active.bg_fill = egui::Color32::from_rgba_premultiplied(80, 80, 80, 100);
-    cc.egui_ctx.set_style(style);
+    ctx.set_style(style);
 
     if let Some(font_path) = find_font(font_family()) {
         if let Ok(font_data) = std::fs::read(&font_path) {
@@ -385,7 +409,7 @@ pub fn setup_transparent_style(cc: &eframe::CreationContext) {
             );
             fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap()
                 .insert(0, "inter".to_owned());
-            cc.egui_ctx.set_fonts(fonts);
+            ctx.set_fonts(fonts);
         }
     }
 }
@@ -490,7 +514,7 @@ pub fn paint_highlighted(
     if last < text.len() {
         job.append(&text[last..], 0.0, base_fmt);
     }
-    let galley = ui.fonts(|f| f.layout_job(job));
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
     ui.painter().galley(pos, galley, Color32::TRANSPARENT);
 }
 

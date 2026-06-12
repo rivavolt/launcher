@@ -1,16 +1,27 @@
-//! Clipboard manager — reads from clipd's SQLite database
+//! Clipboard manager rendered on a wlr-layer-shell overlay surface (see
+//! `launcher::layer`). Reads history from clipd's SQLite database. Persistent
+//! daemon: idles until a SIGUSR1 show request, pops up an overlay surface that
+//! grabs the keyboard, and dismisses on Escape, activation, or focus loss.
 
 use launcher::clip::db::{self, ClipboardDb};
 use launcher::clip::mime as clip_mime;
-use launcher::common::{self, colors, handle_navigation_keys, virtual_list};
+use launcher::common::{self, colors, handle_navigation_keys};
+use launcher::layer::{self, LayerApp};
 use launcher::scroll::ScrollMomentum;
 use launcher::hyprland;
-use eframe::egui::{self, CentralPanel, Context, ScrollArea, FontFamily, FontId, Ui};
+use egui::{self, CentralPanel, Context, ScrollArea, FontFamily, FontId, Ui};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::io::Write as IoWrite;
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Horizontal inset of the expanded focused-row content from the row edges.
+const EXPAND_PAD_X: f32 = 12.0;
+/// Vertical gap between stacked elements inside an expanded row.
+const EXPAND_GAP: f32 = 8.0;
+/// Metadata line font size in the expanded row.
+const META_FONT_SIZE: f32 = 11.0;
 
 struct Entry {
     id: i64,
@@ -29,6 +40,7 @@ fn now_secs() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64
 }
 
+/// Verbose relative time for the focused row's metadata line.
 fn relative_time(unix_secs: i64) -> String {
     let diff = now_secs() - unix_secs;
     if diff < 60 { "now".into() }
@@ -38,19 +50,53 @@ fn relative_time(unix_secs: i64) -> String {
     else { format!("{}w", diff / (7 * 86400)) }
 }
 
-fn time_bucket(unix_secs: i64, now: i64) -> &'static str {
+/// Compact per-row timestamp: relative for recent items, absolute for older
+/// ones. Thresholds — <1m: "now"; <1h: "5m"; <24h: "2h"; <7d: weekday ("Mon");
+/// older: short date ("5 Mar", with the year once it's last year or earlier).
+fn compact_time(unix_secs: i64) -> String {
+    let now = now_secs();
     let diff = now - unix_secs;
-    if diff < 300 { "Just now" }
-    else if diff < 86400 { "Today" }
-    else if diff < 172800 { "Yesterday" }
-    else if diff < 604800 { "This week" }
-    else if diff < 2592000 { "This month" }
-    else { "Older" }
+    if diff < 0 { return "now".into(); }
+    if diff < 60 { return "now".into(); }
+    if diff < 3600 { return format!("{}m", diff / 60); }
+    if diff < 86400 { return format!("{}h", diff / 3600); }
+    if diff < 7 * 86400 {
+        const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+        // Unix epoch (1970-01-01) was a Thursday → index 3.
+        let dow = (unix_secs.div_euclid(86400) + 3).rem_euclid(7) as usize;
+        return DAYS[dow].to_string();
+    }
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let (y, m, d) = civil_from_days(unix_secs.div_euclid(86400));
+    let (cur_y, _, _) = civil_from_days(now.div_euclid(86400));
+    if y < cur_y {
+        format!("{} {} {}", d, MONTHS[(m - 1) as usize], y)
+    } else {
+        format!("{} {}", d, MONTHS[(m - 1) as usize])
+    }
+}
+
+/// Convert a count of days since the Unix epoch into a civil (year, month,
+/// day) date. Howard Hinnant's `civil_from_days` algorithm — proleptic
+/// Gregorian, valid across the full range we care about, no external deps.
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 #[derive(Clone, Copy)]
 enum DisplayItem {
-    Header(&'static str),
     Entry(usize), // index into entries
 }
 
@@ -67,17 +113,28 @@ struct App {
     _watcher: Option<RecommendedWatcher>,
     scroll_momentum: ScrollMomentum,
     last_ensured: Option<usize>,
+    /// Surface width and maximum height, in logical pixels. Width is fixed;
+    /// the rendered height grows with the entry list up to `max_size.1`.
     max_size: (f32, f32),
-    monitor_size: (f32, f32),
-    last_height: f32,
     deleting: Option<(usize, std::time::Instant)>,
+    /// Bring the focused row into view next frame — set on selection change
+    /// and after a focused image's texture loads (its row just grew).
+    scroll_pending: bool,
+    last_selected: usize,
 }
 
 impl App {
     fn new() -> Self {
-        let eframe_size = hyprland::window_size(0.618, 0.618, (500.0, 400.0));
-        let max_size = (eframe_size.0 * 2.0, eframe_size.1 * 2.0);
-        let monitor_size = hyprland::monitor_logical_size();
+        // Surface dimensions in logical pixels — same ratios as the launcher
+        // (src/launcher.rs), so the two overlays are spatially consistent.
+        // layer-shell `set_size` is logical, so use the monitor logical size
+        // directly (no eframe 2x-HiDPI halving).
+        let (mon_w, mon_h) = hyprland::monitor_logical_size();
+        let max_size = if mon_w > 0.0 && mon_h > 0.0 {
+            (mon_w * 0.382, mon_h * 0.618)
+        } else {
+            (600.0, 800.0)
+        };
 
         Self {
             query: String::new(),
@@ -93,9 +150,9 @@ impl App {
             scroll_momentum: ScrollMomentum::new(),
             last_ensured: None,
             max_size,
-            monitor_size,
-            last_height: 0.0,
             deleting: None,
+            scroll_pending: false,
+            last_selected: 0,
         }
     }
 
@@ -103,31 +160,20 @@ impl App {
     fn selected_entry_idx(&self) -> Option<usize> {
         match self.display.get(self.selected)? {
             DisplayItem::Entry(idx) => Some(*idx),
-            DisplayItem::Header(_) => None,
         }
     }
 
-    /// Navigate to the next Entry item in the given direction, skipping headers
+    /// Navigate to the next row, clamped to the list bounds.
     fn nav_next(&self) -> usize {
-        let mut next = self.selected + 1;
-        while next < self.display.len() {
-            if matches!(self.display[next], DisplayItem::Entry(_)) { return next; }
-            next += 1;
-        }
-        self.selected
+        let next = self.selected + 1;
+        if next < self.display.len() { next } else { self.selected }
     }
 
     fn nav_prev(&self) -> usize {
-        if self.selected == 0 { return self.selected; }
-        let mut prev = self.selected - 1;
-        loop {
-            if matches!(self.display[prev], DisplayItem::Entry(_)) { return prev; }
-            if prev == 0 { return self.selected; }
-            prev -= 1;
-        }
+        self.selected.saturating_sub(1)
     }
 
-    fn setup_watcher(&mut self, ctx: &Context) {
+    fn setup_watcher(&mut self) {
         use std::sync::atomic::Ordering;
 
         let db_dir = db::default_db_path()
@@ -136,15 +182,15 @@ impl App {
             .unwrap_or_else(|| "/tmp".into());
 
         let needs_reload = self.needs_reload.clone();
-        let ctx = ctx.clone();
 
         if let Ok(mut watcher) = RecommendedWatcher::new(
             move |res: Result<notify::Event, notify::Error>| {
                 if let Ok(event) = res {
                     use notify::EventKind;
                     if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)) {
+                        // Consumed by the event loop's next frame while visible
+                        // (it polls ~60x/sec); no context-repaint nudge needed.
                         needs_reload.store(true, Ordering::SeqCst);
-                        ctx.request_repaint();
                     }
                 }
             },
@@ -222,10 +268,6 @@ impl App {
 
         self.filter();
         self.selected = old_selected.min(self.display.len().saturating_sub(1));
-        // Snap to nearest entry if we landed on a header
-        if matches!(self.display.get(self.selected), Some(DisplayItem::Header(_))) {
-            self.selected = self.nav_next();
-        }
         self.loaded = true;
     }
 
@@ -241,23 +283,9 @@ impl App {
                 .collect()
         };
 
-        // Build display list with section headers
-        self.display.clear();
-        let now = now_secs();
-        let mut last_bucket = "";
-        for &idx in &entry_indices {
-            let bucket = time_bucket(self.entries[idx].last_used, now);
-            if bucket != last_bucket {
-                self.display.push(DisplayItem::Header(bucket));
-                last_bucket = bucket;
-            }
-            self.display.push(DisplayItem::Entry(idx));
-        }
-
-        // Select first entry (skip headers)
-        self.selected = self.display.iter()
-            .position(|d| matches!(d, DisplayItem::Entry(_)))
-            .unwrap_or(0);
+        // Flat list — one row per entry, no section headers.
+        self.display = entry_indices.into_iter().map(DisplayItem::Entry).collect();
+        self.selected = 0;
     }
 
     fn activate(&mut self) {
@@ -282,12 +310,22 @@ impl App {
         self.should_hide = true;
     }
 
+    /// Reset transient state when the overlay is dismissed. The harness has
+    /// already unmapped the surface; here we clear the query and drop the
+    /// (now stale, context-bound) entry textures so the next pop-up rebuilds
+    /// them against its fresh egui context.
     fn hide_and_reset(&mut self) {
         self.query.clear();
         self.selected = 0;
-        self.filter();
         self.should_hide = false;
-        hyprland::dispatch_async(r#"hl.dsp.workspace.toggle_special("clipboard")"#);
+        self.loaded = false;
+        self.last_ensured = None;
+        self.failed_textures.clear();
+        for e in &mut self.entries {
+            e.texture = None;
+            e.thumb = None;
+        }
+        self.filter();
     }
 
     fn delete(&mut self, ctx: &Context) {
@@ -301,7 +339,82 @@ impl App {
         self.load_entries(ctx);
     }
 
-    fn render(&mut self, ctx: &Context) {
+    /// Inner content width available to a row, after the panel's own margins.
+    fn row_content_width(&self) -> f32 {
+        self.max_size.0
+    }
+
+    /// Largest height the expanded image preview may occupy.
+    fn max_image_preview_height(&self) -> f32 {
+        self.max_size.1 * 0.5
+    }
+
+    /// Largest height the expanded text preview may occupy.
+    fn max_text_preview_height(&self) -> f32 {
+        self.max_size.1 * 0.55
+    }
+
+    /// Total height of the focused entry's expanded row — a self-contained
+    /// card with `EXPAND_PAD_X` inset top and bottom, holding the wrapped text
+    /// galley (capped) or the scaled inline image, then the metadata line.
+    /// No compact summary line: the full content's own first line serves it.
+    fn expanded_extra_height(&self, ctx: &Context, idx: usize) -> f32 {
+        let e = &self.entries[idx];
+        let inner_w = (self.row_content_width() - EXPAND_PAD_X * 2.0).max(1.0);
+        // Top/bottom inset + content + gap + metadata line.
+        let chrome = EXPAND_PAD_X * 2.0 + EXPAND_GAP + META_FONT_SIZE;
+
+        if e.is_image {
+            let img_h = if let Some(tex) = &e.texture {
+                let ts = tex.size_vec2();
+                let scale = (inner_w / ts.x).min(1.0);
+                (ts.y * scale).min(self.max_image_preview_height())
+            } else {
+                // Texture not loaded yet — reserve from intrinsic dims.
+                e.dims
+                    .map(|(w, h)| {
+                        let scale = (inner_w / w as f32).min(1.0);
+                        (h as f32 * scale).min(self.max_image_preview_height())
+                    })
+                    .unwrap_or(common::row_height() * 2.0)
+            };
+            img_h + chrome
+        } else {
+            let galley = ctx.fonts_mut(|f| {
+                expanded_text_galley(f, &e.text, inner_w, self.max_text_preview_height())
+            });
+            galley.size().y + chrome
+        }
+    }
+
+    /// Per-display-item heights for the current `display` list. The focused
+    /// entry is replaced by its expanded card (full content + metadata, no
+    /// compact line); everything else stays compact (one row tall).
+    fn item_heights(&self, ctx: &Context) -> Vec<f32> {
+        self.display
+            .iter()
+            .enumerate()
+            .map(|(i, item)| match item {
+                DisplayItem::Entry(idx) => {
+                    if i == self.selected {
+                        self.expanded_extra_height(ctx, *idx)
+                    } else {
+                        common::row_height()
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// Draw one frame and return the desired total surface height in logical
+    /// pixels. The harness diffs this against the live surface height and
+    /// issues a `set_size` when it changes — the top-anchored auto-grow that
+    /// `hyprland::resize_anchored` used to provide.
+    fn render(&mut self, ctx: &Context) -> f32 {
+        // The 1px gold outline + rounded corners that Hyprland window rules
+        // used to paint; a layer surface has no server-side decorations.
+        common::popup_border(ctx);
+
         let (mut activate, mut delete) = (false, false);
 
         let (down, up) = handle_navigation_keys(ctx, &mut self.held_key);
@@ -334,16 +447,21 @@ impl App {
 
         if down { self.selected = self.nav_next(); }
         if up { self.selected = self.nav_prev(); }
-        if activate { self.activate(); return; }
+        if activate { self.activate(); return self.max_size.1; }
         if delete && self.deleting.is_none() {
             self.deleting = Some((self.selected, std::time::Instant::now()));
             ctx.request_repaint();
         }
 
-        // Ensure texture for selected entry
+        // Ensure texture for selected entry. A focused image row grows once
+        // its texture loads, so re-scroll it into view when that happens.
         if let Some(idx) = self.selected_entry_idx() {
             if self.last_ensured != Some(idx) {
+                let had_tex = self.entries[idx].texture.is_some();
                 self.ensure_texture(ctx, idx);
+                if !had_tex && self.entries[idx].texture.is_some() {
+                    self.scroll_pending = true;
+                }
                 self.last_ensured = Some(idx);
             }
         }
@@ -352,315 +470,412 @@ impl App {
         if input_panel.changed || input_panel.cleared { self.filter(); }
         let input_response = input_panel.response;
 
-        // Check if selected entry has preview content
-        let (has_preview, preview_content_height) = self.selected_entry_idx()
-            .map(|idx| {
-                let e = &self.entries[idx];
-                if e.is_image {
-                    let h = if let Some(tex) = &e.texture {
-                        let ts = tex.size_vec2();
-                        let preview_w = self.max_size.0 * 0.382 - 20.0;
-                        let scale = (preview_w / ts.x).min(1.0);
-                        ts.y * scale + common::text_size() * 2.0 + 16.0
-                    } else { 0.0 };
-                    (true, h)
-                } else if e.text.contains('\n') || e.text.chars().count() > 80 {
-                    let preview_w = self.max_size.0 * 0.382 - 20.0;
-                    let font = FontId::new(common::text_size(), FontFamily::Proportional);
-                    let galley = ctx.fonts(|f| f.layout(
-                        e.text.clone(), font, colors::TEXT_PRIMARY, preview_w,
-                    ));
-                    (true, galley.size().y + common::text_size() + 16.0)
-                } else {
-                    (false, 0.0)
-                }
-            })
-            .unwrap_or((false, 0.0));
+        // Per-item heights — the focused entry expands in place; everything
+        // else stays compact (one row tall).
+        let heights = self.item_heights(ctx);
+        let spacing_y = 0.0; // rows are laid out contiguously; gaps live inside rows
 
-        // Preview pane (right side)
-        if has_preview {
-            egui::SidePanel::right("preview")
-                .frame(common::preview_frame())
-                .resizable(false)
-                .exact_width(self.max_size.0 * 0.382)
-                .show(ctx, |ui| {
-                    if let Some(idx) = self.selected_entry_idx() {
-                        let e = &self.entries[idx];
-                        ScrollArea::vertical()
-                            .id_salt("preview_scroll")
-                            .show(ui, |ui| {
-                                if e.is_image {
-                                    if let Some(tex) = &e.texture {
-                                        let ts = tex.size_vec2();
-                                        let max_w = ui.available_width();
-                                        let scale = (max_w / ts.x).min(1.0);
-                                        let img_size = egui::vec2(ts.x * scale, ts.y * scale);
-                                        ui.image(egui::load::SizedTexture::new(tex.id(), img_size));
-                                    }
-                                    if let Some((w, h)) = e.dims {
-                                        ui.add_space(4.0);
-                                        ui.label(egui::RichText::new(format!("{}×{}", w, h))
-                                            .font(FontId::new(common::text_size() * 0.85, FontFamily::Monospace))
-                                            .color(colors::TEXT_SUBTITLE));
-                                    }
-                                } else {
-                                    let font = FontId::new(common::text_size(), FontFamily::Proportional);
-                                    let galley = ui.painter().layout(
-                                        e.text.clone(),
-                                        font,
-                                        colors::TEXT_PRIMARY,
-                                        ui.available_width(),
-                                    );
-                                    let (rect, _) = ui.allocate_exact_size(galley.size(), egui::Sense::hover());
-                                    ui.painter().galley(rect.min, galley, colors::TEXT_PRIMARY);
-                                }
-
-                                // Metadata line — hide obvious-default MIME types
-                                ui.add_space(8.0);
-                                let meta_font = FontId::new(common::text_size() * 0.75, FontFamily::Monospace);
-                                let mut parts: Vec<&str> = Vec::new();
-                                if common::should_show_mime_label(&e.mime) {
-                                    parts.push(e.mime.as_str());
-                                }
-                                if let Some(app) = &e.source_app {
-                                    parts.push(app.as_str());
-                                }
-                                let time_str = relative_time(e.last_used);
-                                parts.push(&time_str);
-                                ui.label(egui::RichText::new(parts.join(" · "))
-                                    .font(meta_font)
-                                    .color(colors::TEXT_SUBTITLE));
-                            });
-                    }
-                });
-        }
-
-        CentralPanel::default()
+        let panel = CentralPanel::default()
             .frame(common::panel_frame())
             .show(ctx, |ui: &mut Ui| {
                 let header_height = input_response.response.rect.height();
-                let max_visible = 12;
-                let num_items = self.display.len().min(max_visible);
-                let spacing_y = ui.spacing().item_spacing.y;
-                let items_height = if num_items > 0 {
-                    num_items as f32 * common::row_height() + (num_items - 1) as f32 * spacing_y
-                } else if !self.query.is_empty() {
-                    common::row_height()
+
+                // Fit the surface to the visible rows, up to the height budget.
+                // The closure returns this so the harness can resize the layer
+                // surface (top-anchored, so the input row stays put).
+                let items_height: f32 = if heights.is_empty() {
+                    if self.query.is_empty() { 0.0 } else { common::row_height() }
                 } else {
-                    0.0
+                    heights.iter().sum::<f32>()
+                        + spacing_y * heights.len().saturating_sub(1) as f32
                 };
-                let min_height = if has_preview {
-                    (header_height + preview_content_height + 20.0).min(self.max_size.1)
-                } else {
-                    0.0
-                };
-                let desired_height = (header_height + items_height).max(min_height);
-                let target_height = desired_height.min(self.max_size.1);
-                if (target_height - self.last_height).abs() > 1.0 {
-                    self.last_height = target_height;
-                    // Top-anchored: pin the input at a fixed Y as the list grows,
-                    // instead of letting the resize recentroid (which would slide
-                    // the input vertically each keystroke).
-                    hyprland::resize_anchored(
-                        "clipboard",
-                        self.max_size.0 as i32, target_height as i32,
-                        self.monitor_size.0, self.monitor_size.1,
-                        common::Y_ANCHOR_RATIO,
-                    );
-                }
+                let target_height =
+                    (header_height + items_height).min(self.max_size.1);
 
                 let list_height = (self.max_size.1 - header_height).max(common::row_height());
-                let scroll_to_selected = down || up;
+                if self.selected != self.last_selected {
+                    self.scroll_pending = true;
+                    self.last_selected = self.selected;
+                }
+                let scroll_to_selected = down || up || self.scroll_pending;
+                self.scroll_pending = false;
 
-                let has_entries = self.display.iter().any(|d| matches!(d, DisplayItem::Entry(_)));
+                let has_entries = !self.display.is_empty();
                 if !has_entries && !self.query.is_empty() {
                     common::empty_state(ui);
                 } else {
                     let display = &self.display;
                     let entries = &self.entries;
                     let query = &self.query;
+                    let selected = self.selected;
+                    let deleting = self.deleting;
 
                     let scroll_output = ScrollArea::vertical()
                         .id_salt("clip_list")
                         .max_height(list_height)
                         .show(ui, |ui: &mut Ui| {
-                            let deleting = self.deleting;
-                            let vl = virtual_list(
-                                ui,
-                                display.len(),
-                                common::row_height(),
-                                self.selected,
-                                scroll_to_selected,
-                                true, // we handle selection highlight ourselves
-                                |ui, i, rect| {
-                                    match display[i] {
-                                        DisplayItem::Header(label) => {
-                                            // Section header: label with subtle line
-                                            let font = FontId::new(common::text_size() * 0.8, FontFamily::Proportional);
-                                            let galley = ui.painter().layout_no_wrap(
-                                                label.to_string(), font.clone(), colors::TEXT_SUBTITLE,
-                                            );
-                                            let text_w = galley.size().x;
-                                            let y = rect.center().y;
-                                            ui.painter().galley(
-                                                egui::pos2(rect.min.x + 12.0, y - galley.size().y / 2.0),
-                                                galley,
-                                                colors::TEXT_SUBTITLE,
-                                            );
-                                            // Subtle line after label
-                                            ui.painter().line_segment(
-                                                [egui::pos2(rect.min.x + 12.0 + text_w + 8.0, y),
-                                                 egui::pos2(rect.max.x - 12.0, y)],
-                                                egui::Stroke::new(0.5, colors::TEXT_MUTED),
-                                            );
-                                        }
-                                        DisplayItem::Entry(idx) => {
-                                            let e = &entries[idx];
-                                            let sel = i == self.selected;
+                            let list_top = ui.cursor().min.y;
+                            let full_w = ui.available_width();
 
-                                            // Selection highlight (since we use skip_selected_highlight)
-                                            if sel {
-                                                ui.painter().rect_filled(rect, 0.0, colors::BG_SELECTED);
-                                                let bar = egui::Rect::from_min_size(
-                                                    rect.left_top(),
-                                                    egui::vec2(colors::ACCENT_BAR, common::row_height()),
-                                                );
-                                                ui.painter().rect_filled(bar, 0.0, colors::ACCENT);
-                                            }
+                            // Row offsets (prefix sum of heights).
+                            let mut offsets = Vec::with_capacity(heights.len() + 1);
+                            let mut acc = 0.0;
+                            for &h in &heights {
+                                offsets.push(acc);
+                                acc += h + spacing_y;
+                            }
+                            offsets.push(acc);
+                            let total_h = acc;
 
-                                            // Fade + slide animation for deleting row
-                                            let (alpha, x_offset) = if let Some((del_i, t)) = deleting {
-                                                if i == del_i {
-                                                    let progress = (t.elapsed().as_secs_f32() / 0.15).min(1.0);
-                                                    (((1.0 - progress) * 255.0) as u8, -progress * 40.0)
-                                                } else { (255, 0.0) }
-                                            } else { (255, 0.0) };
+                            // Scroll the focused (possibly expanded) row into view.
+                            if scroll_to_selected && selected < heights.len() {
+                                let r = egui::Rect::from_min_size(
+                                    egui::pos2(0.0, list_top + offsets[selected]),
+                                    egui::vec2(full_w, heights[selected]),
+                                );
+                                ui.scroll_to_rect(r, None);
+                            }
 
-                                            let base_color = common::row_text_color(sel);
-                                            let text_color = egui::Color32::from_rgba_unmultiplied(
-                                                base_color.r(), base_color.g(), base_color.b(), alpha,
-                                            );
-
-                                            let rx = rect.min.x + x_offset;
-                                            let text_font = FontId::new(common::text_size(), FontFamily::Proportional);
-                                            let content_y = rect.min.y + (common::row_height() - common::text_size()) / 2.0;
-
-                                            if e.is_image {
-                                                let container_size = common::row_height() - 4.0;
-                                                let container_rect = egui::Rect::from_min_size(
-                                                    egui::pos2(rx + 8.0, rect.min.y + 2.0),
-                                                    egui::vec2(container_size, container_size),
-                                                );
-                                                ui.painter().rect_filled(container_rect, 2.0,
-                                                    egui::Color32::from_rgba_premultiplied(13, 13, 13, alpha));
-
-                                                let row_tex = e.thumb.as_ref().or(e.texture.as_ref());
-                                                if let Some(tex) = row_tex {
-                                                    let tex_size = tex.size_vec2();
-                                                    let scale = (container_size / tex_size.x).min(container_size / tex_size.y);
-                                                    let img_w = tex_size.x * scale;
-                                                    let img_h = tex_size.y * scale;
-                                                    let img_rect = egui::Rect::from_min_size(
-                                                        egui::pos2(
-                                                            container_rect.min.x + (container_size - img_w) / 2.0,
-                                                            container_rect.min.y + (container_size - img_h) / 2.0,
-                                                        ),
-                                                        egui::vec2(img_w, img_h),
-                                                    );
-                                                    let tint = if sel {
-                                                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha)
-                                                    } else {
-                                                        egui::Color32::from_rgba_unmultiplied(128, 128, 128, alpha)
-                                                    };
-                                                    ui.painter().image(
-                                                        tex.id(), img_rect,
-                                                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                                                        tint,
-                                                    );
-                                                }
-                                                let display_text = e.dims.map(|(w, h)| format!("{}×{}", w, h))
-                                                    .unwrap_or_else(|| "image".into());
-                                                let mono_font = FontId::new(common::text_size() * 0.85, FontFamily::Monospace);
-                                                let text_x = rx + 8.0 + container_size + 8.0;
-                                                ui.painter().text(
-                                                    egui::pos2(text_x, content_y),
-                                                    egui::Align2::LEFT_TOP, &display_text, mono_font, text_color,
-                                                );
-                                            } else {
-                                                let display = common::clip_display_line(&e.text);
-                                                let line = display.as_str();
-                                                let text_x = rx + 12.0;
-                                                let avail_w = rect.max.x - text_x - 12.0;
-                                                let text_pos = egui::pos2(text_x, content_y);
-                                                let indices = common::match_indices(line, query);
-
-                                                let base_fmt = egui::TextFormat { font_id: text_font.clone(), color: text_color, ..Default::default() };
-                                                let hl_fmt = egui::TextFormat {
-                                                    font_id: text_font.clone(),
-                                                    color: colors::ACCENT,
-                                                    underline: egui::Stroke::new(1.0, colors::ACCENT),
-                                                    ..Default::default()
-                                                };
-
-                                                let mut job = egui::text::LayoutJob::default();
-                                                if indices.is_empty() {
-                                                    job.append(line, 0.0, base_fmt);
-                                                } else {
-                                                    let mut last = 0;
-                                                    for &idx in &indices {
-                                                        if idx > last { job.append(&line[last..idx], 0.0, base_fmt.clone()); }
-                                                        let ch_len = line[idx..].chars().next().map_or(1, |c| c.len_utf8());
-                                                        job.append(&line[idx..idx + ch_len], 0.0, hl_fmt.clone());
-                                                        last = idx + ch_len;
-                                                    }
-                                                    if last < line.len() { job.append(&line[last..], 0.0, base_fmt); }
-                                                }
-                                                job.wrap = egui::text::TextWrapping {
-                                                    max_rows: 1,
-                                                    max_width: avail_w,
-                                                    overflow_character: Some('…'),
-                                                    break_anywhere: true,
-                                                };
-                                                let galley = ui.fonts(|f| f.layout_job(job));
-                                                ui.painter().galley(text_pos, galley, egui::Color32::TRANSPARENT);
-                                            }
-                                        }
-                                    }
-                                },
+                            // Allocate the full content area; paint rows into it.
+                            let (area, _) = ui.allocate_exact_size(
+                                egui::vec2(full_w, total_h),
+                                egui::Sense::hover(),
                             );
-                            vl
+
+                            let clip = ui.clip_rect();
+                            let mut clicked: Option<usize> = None;
+
+                            for i in 0..display.len() {
+                                let row_rect = egui::Rect::from_min_size(
+                                    egui::pos2(area.min.x, list_top + offsets[i]),
+                                    egui::vec2(full_w, heights[i]),
+                                );
+                                // Skip rows fully outside the viewport.
+                                if row_rect.max.y < clip.min.y || row_rect.min.y > clip.max.y {
+                                    continue;
+                                }
+
+                                let row_resp = ui.interact(
+                                    row_rect,
+                                    ui.id().with(("clip_row", i)),
+                                    egui::Sense::click(),
+                                );
+
+                                match display[i] {
+                                    DisplayItem::Entry(idx) => {
+                                        let sel = i == selected;
+                                        // Hover hint, painted under the content
+                                        // (compact, non-selected rows only).
+                                        if !sel && row_resp.hovered() {
+                                            ui.painter().rect_filled(
+                                                egui::Rect::from_min_size(
+                                                    row_rect.min,
+                                                    egui::vec2(full_w, common::row_height()),
+                                                ),
+                                                0.0, colors::BG_HOVER,
+                                            );
+                                        }
+                                        paint_entry_row(
+                                            ui, row_rect, &entries[idx], sel, query,
+                                            deleting.filter(|(d, _)| *d == i).map(|(_, t)| t),
+                                        );
+                                    }
+                                }
+
+                                if row_resp.clicked() {
+                                    clicked = Some(i);
+                                }
+                            }
+
+                            clicked
                         });
 
                     common::paint_scroll_fade(ui, scroll_output.inner_rect, 16.0);
 
-                    if let Some(i) = scroll_output.inner.clicked {
-                        if matches!(display[i], DisplayItem::Entry(_)) {
-                            self.selected = i;
-                            self.activate();
-                        }
+                    // Click an entry to paste it (matches keyboard Enter).
+                    if let Some(i) = scroll_output.inner {
+                        self.selected = i;
+                        self.activate();
                     }
                 }
+
+                target_height
             });
+
+        panel.inner
     }
 }
 
-impl eframe::App for App {
-    fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
-        [0.0, 0.0, 0.0, 0.0]
+/// Lay out the focused entry's full text for the expanded area: word-wrapped
+/// to `width`, capped to whatever number of whole rows fits in `max_height`,
+/// with an ellipsis on the last row when truncated. Both the height estimate
+/// (`expanded_extra_height`) and the painter use this so they always agree.
+fn expanded_text_galley(
+    fonts: &mut egui::epaint::text::FontsView<'_>,
+    text: &str,
+    width: f32,
+    max_height: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let font = FontId::new(common::text_size(), FontFamily::Proportional);
+    let row_h = fonts.row_height(&font);
+    let max_rows = ((max_height / row_h).floor() as usize).max(1);
+
+    // Trim surrounding blank space (internal layout is preserved) so the
+    // preview doesn't open with empty lines.
+    let mut job = egui::text::LayoutJob::single_section(
+        text.trim().to_owned(),
+        egui::TextFormat { font_id: font, color: colors::TEXT_PRIMARY, ..Default::default() },
+    );
+    job.wrap = egui::text::TextWrapping {
+        max_rows,
+        max_width: width,
+        overflow_character: Some('…'),
+        // Break inside long unbroken runs (URLs, tokens, base64) so the
+        // preview never overflows the row width.
+        break_anywhere: true,
+    };
+    fonts.layout_job(job)
+}
+
+/// Paint a single clipboard entry row. A non-focused row shows a single
+/// compact line plus a small right-aligned timestamp. The focused row
+/// (`sel` true) is replaced by an expanded card: the full word-wrapped text
+/// (or a large inline image) plus a metadata line — no compact line, since
+/// the full content's own first line already serves it, and no separate
+/// timestamp, since the metadata line carries it. `deleting` carries the
+/// fade/slide animation start time.
+fn paint_entry_row(
+    ui: &Ui,
+    rect: egui::Rect,
+    e: &Entry,
+    sel: bool,
+    query: &str,
+    deleting: Option<std::time::Instant>,
+) {
+    let row_h = common::row_height();
+
+    // Selection background spans the whole (possibly expanded) row.
+    if sel {
+        ui.painter().rect_filled(rect, 0.0, colors::BG_SELECTED);
+        let bar = egui::Rect::from_min_size(
+            rect.left_top(),
+            egui::vec2(colors::ACCENT_BAR, rect.height()),
+        );
+        ui.painter().rect_filled(bar, 0.0, colors::ACCENT);
     }
 
-    fn update(&mut self, ctx: &Context, _: &mut eframe::Frame) {
+    // Delete animation: fade out + slide left.
+    let (alpha, x_offset) = if let Some(t) = deleting {
+        let progress = (t.elapsed().as_secs_f32() / 0.15).min(1.0);
+        (((1.0 - progress) * 255.0) as u8, -progress * 40.0)
+    } else {
+        (255, 0.0)
+    };
+
+    let base_color = common::row_text_color(sel);
+    let text_color = egui::Color32::from_rgba_unmultiplied(
+        base_color.r(), base_color.g(), base_color.b(), alpha,
+    );
+    let text_font = FontId::new(common::text_size(), FontFamily::Proportional);
+    let rx = rect.min.x + x_offset;
+    let content_y = rect.min.y + (row_h - common::text_size()) / 2.0;
+
+    if sel {
+        paint_expanded_row(ui, rect, e, x_offset);
+        return;
+    }
+
+    // --- per-row timestamp (compact rows): small, dim, right-aligned ---
+    // Painted first so the content line can reserve room and not overlap it.
+    let time_font = FontId::new(common::text_size() * 0.78, FontFamily::Proportional);
+    let time_galley = ui.painter().layout_no_wrap(
+        compact_time(e.last_used), time_font, colors::TEXT_MUTED,
+    );
+    let time_w = time_galley.size().x;
+    let time_right = rect.max.x - EXPAND_PAD_X + x_offset;
+    {
+        let muted = colors::TEXT_MUTED;
+        let time_color = egui::Color32::from_rgba_unmultiplied(
+            muted.r(), muted.g(), muted.b(),
+            ((muted.a() as u32 * alpha as u32) / 255) as u8,
+        );
+        let ty = rect.min.y + (row_h - time_galley.size().y) / 2.0;
+        ui.painter().galley(
+            egui::pos2(time_right - time_w, ty), time_galley, time_color,
+        );
+    }
+    // Right edge available to the compact content, clear of the time label.
+    let content_right = time_right - time_w - 10.0;
+
+    // --- compact line ---
+    if e.is_image {
+        let thumb_box = row_h - 4.0;
+        let box_rect = egui::Rect::from_min_size(
+            egui::pos2(rx + 8.0, rect.min.y + 2.0),
+            egui::vec2(thumb_box, thumb_box),
+        );
+        ui.painter().rect_filled(box_rect, 2.0,
+            egui::Color32::from_rgba_premultiplied(13, 13, 13, alpha));
+        let row_tex = e.thumb.as_ref().or(e.texture.as_ref());
+        if let Some(tex) = row_tex {
+            let ts = tex.size_vec2();
+            let scale = (thumb_box / ts.x).min(thumb_box / ts.y);
+            let (iw, ih) = (ts.x * scale, ts.y * scale);
+            let img_rect = egui::Rect::from_min_size(
+                egui::pos2(
+                    box_rect.min.x + (thumb_box - iw) / 2.0,
+                    box_rect.min.y + (thumb_box - ih) / 2.0,
+                ),
+                egui::vec2(iw, ih),
+            );
+            let tint = if sel {
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha)
+            } else {
+                egui::Color32::from_rgba_unmultiplied(128, 128, 128, alpha)
+            };
+            ui.painter().image(
+                tex.id(), img_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                tint,
+            );
+        }
+        let label = e.dims.map(|(w, h)| format!("{}×{}", w, h))
+            .unwrap_or_else(|| "image".into());
+        let mono = FontId::new(common::text_size() * 0.85, FontFamily::Monospace);
+        let label_x = rx + 8.0 + thumb_box + 8.0;
+        let mut label_job = egui::text::LayoutJob::single_section(
+            label,
+            egui::TextFormat { font_id: mono, color: text_color, ..Default::default() },
+        );
+        label_job.wrap = egui::text::TextWrapping {
+            max_rows: 1,
+            max_width: (content_right - label_x).max(1.0),
+            overflow_character: Some('…'),
+            break_anywhere: true,
+        };
+        let label_galley = ui.fonts_mut(|f| f.layout_job(label_job));
+        ui.painter().galley(
+            egui::pos2(label_x, content_y), label_galley, egui::Color32::TRANSPARENT,
+        );
+    } else {
+        let line = common::clip_display_line(&e.text);
+        let text_x = rx + EXPAND_PAD_X;
+        let avail_w = (content_right - text_x).max(1.0);
+        let indices = common::match_indices(&line, query);
+        let base_fmt = egui::TextFormat {
+            font_id: text_font.clone(), color: text_color, ..Default::default()
+        };
+        let hl_fmt = egui::TextFormat {
+            font_id: text_font.clone(),
+            color: colors::ACCENT,
+            underline: egui::Stroke::new(1.0, colors::ACCENT),
+            ..Default::default()
+        };
+        let mut job = egui::text::LayoutJob::default();
+        if indices.is_empty() {
+            job.append(&line, 0.0, base_fmt);
+        } else {
+            let mut last = 0;
+            for &idx in &indices {
+                if idx > last { job.append(&line[last..idx], 0.0, base_fmt.clone()); }
+                let ch_len = line[idx..].chars().next().map_or(1, |c| c.len_utf8());
+                job.append(&line[idx..idx + ch_len], 0.0, hl_fmt.clone());
+                last = idx + ch_len;
+            }
+            if last < line.len() { job.append(&line[last..], 0.0, base_fmt); }
+        }
+        job.wrap = egui::text::TextWrapping {
+            max_rows: 1,
+            max_width: avail_w,
+            overflow_character: Some('…'),
+            break_anywhere: true,
+        };
+        let galley = ui.fonts_mut(|f| f.layout_job(job));
+        ui.painter().galley(egui::pos2(text_x, content_y), galley, egui::Color32::TRANSPARENT);
+    }
+}
+
+/// Paint the focused entry's expanded card into `rect`: the full word-wrapped
+/// text (or a large inline image) at the top, then a metadata line at the
+/// bottom. `EXPAND_PAD_X` insets the content top and bottom; the layout
+/// mirrors `expanded_extra_height` so reserved and painted heights agree.
+/// There is deliberately no compact summary line and no separate timestamp —
+/// the full content's first line and the metadata line cover both.
+fn paint_expanded_row(ui: &Ui, rect: egui::Rect, e: &Entry, x_offset: f32) {
+    let inner_x = rect.min.x + EXPAND_PAD_X + x_offset;
+    let inner_w = (rect.width() - EXPAND_PAD_X * 2.0).max(1.0);
+    let content_top = rect.min.y + EXPAND_PAD_X;
+    let meta_y = rect.max.y - EXPAND_PAD_X - META_FONT_SIZE;
+    // Content runs from the top inset down to the gap above the metadata line.
+    let content_h = (meta_y - EXPAND_GAP - content_top).max(1.0);
+
+    if e.is_image {
+        if let Some(tex) = &e.texture {
+            let ts = tex.size_vec2();
+            let scale = (inner_w / ts.x).min(content_h / ts.y).min(1.0);
+            let (iw, ih) = (ts.x * scale, ts.y * scale);
+            let img_rect = egui::Rect::from_min_size(
+                egui::pos2(inner_x, content_top),
+                egui::vec2(iw, ih),
+            );
+            ui.painter().image(
+                tex.id(), img_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+    } else {
+        let galley = ui.fonts_mut(|f| expanded_text_galley(f, &e.text, inner_w, content_h));
+        ui.painter().galley(
+            egui::pos2(inner_x, content_top), galley, colors::TEXT_PRIMARY,
+        );
+    }
+
+    // Metadata line: dims/MIME (when non-obvious) · source app · relative time.
+    let meta_font = FontId::new(META_FONT_SIZE, FontFamily::Monospace);
+    let mut parts: Vec<String> = Vec::new();
+    if e.is_image {
+        if let Some((w, h)) = e.dims {
+            parts.push(format!("{}×{}", w, h));
+        }
+    }
+    if common::should_show_mime_label(&e.mime) {
+        parts.push(e.mime.clone());
+    }
+    if let Some(app) = &e.source_app {
+        parts.push(app.clone());
+    }
+    parts.push(relative_time(e.last_used));
+    ui.painter().text(
+        egui::pos2(inner_x, meta_y),
+        egui::Align2::LEFT_TOP,
+        parts.join("  ·  "),
+        meta_font,
+        colors::TEXT_SUBTITLE,
+    );
+}
+
+impl LayerApp for App {
+    fn width(&self) -> u32 {
+        self.max_size.0.round().max(1.0) as u32
+    }
+
+    fn init_height(&self) -> u32 {
+        // Start at the input row's height; the first frame's auto-resize grows
+        // it to fit the entry list.
+        (common::input_size() + 16.0).round() as u32
+    }
+
+    fn on_frame_init(&mut self, ctx: &Context) {
+        // The egui context is rebuilt per pop-up, so re-apply fonts/style.
+        common::setup_transparent_style(ctx);
+    }
+
+    // Reload happens via the `!self.loaded` path in `update_ui` (on_hidden
+    // clears `loaded`), so each pop-up refreshes history made while idle.
+
+    fn update_ui(&mut self, ctx: &Context) -> (f32, bool) {
         use std::sync::atomic::Ordering;
-
-        if ctx.input(|i| i.viewport().close_requested()) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.should_hide = true;
-        }
-
-        if self._watcher.is_none() {
-            self.setup_watcher(ctx);
-        }
-
         if !self.loaded {
             self.load_entries(ctx);
             self.needs_reload.store(false, Ordering::SeqCst);
@@ -668,22 +883,19 @@ impl eframe::App for App {
             self.load_entries(ctx);
         }
         self.scroll_momentum.update(ctx);
-        self.render(ctx);
-        if self.should_hide {
-            self.hide_and_reset();
-        }
+        let height = self.render(ctx);
+        (height, self.should_hide)
+    }
+
+    fn on_hidden(&mut self) {
+        self.hide_and_reset();
     }
 }
 
-fn main() -> eframe::Result<()> {
-    let (width, height) = hyprland::window_size(0.618, 0.618, (500.0, 400.0));
-
-    eframe::run_native(
-        "clipboard",
-        common::window_options("clipboard", width, height),
-        Box::new(|cc| {
-            common::setup_transparent_style(cc);
-            Ok(Box::new(App::new()))
-        }),
-    )
+fn main() {
+    let mut app = App::new();
+    // Watch clipd's database for the process lifetime so a copy made while the
+    // clipboard idles marks the list stale for the next pop-up.
+    app.setup_watcher();
+    layer::run("clipboard", app);
 }

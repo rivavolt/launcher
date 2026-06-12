@@ -25,7 +25,17 @@ path = "src/clip-sync.rs"
 
 [dependencies]
 egui = "0.33"
-eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
+# eframe stays for the picker binary (a one-shot dmenu-style window). Pinned to
+# 0.33 to match egui/egui-wgpu 0.33 used by wayapp, so the whole tree shares one
+# egui — the launcher and clipboard moved off eframe onto wayapp's layer-shell
+# harness and only the picker still drives an eframe window.
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
+# wlr-layer-shell surfaces for the launcher and clipboard overlays. wayapp is
+# the vendored egui-on-smithay harness; smithay-client-toolkit is pulled in
+# directly for the layer-shell types (Anchor, Layer, KeyboardInteractivity)
+# the apps configure on their surfaces.
+wayapp = { path = "vendor/wayapp" }
+smithay-client-toolkit = "0.20"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 nucleo-matcher = "0.3"
 strsim = "0.11"

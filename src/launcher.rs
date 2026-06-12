@@ -1,7 +1,11 @@
-//! App launcher using eframe (regular window in special workspace)
+//! App launcher rendered on a wlr-layer-shell overlay surface (see
+//! `launcher::layer`). Persistent daemon: idles until a SIGUSR1 show request,
+//! pops up an overlay surface that grabs the keyboard, and dismisses on
+//! Escape, activation, or focus loss.
 
-use eframe::egui::{self, CentralPanel, Context, Color32, ScrollArea, Ui, FontFamily, FontId};
+use egui::{self, CentralPanel, Context, Color32, ScrollArea, Ui, FontFamily, FontId};
 use launcher::common::{self, colors, handle_navigation_keys, virtual_list};
+use launcher::layer::{self, LayerApp};
 use launcher::scroll::ScrollMomentum;
 use launcher::usage::UsageLog;
 use launcher::{desktop, hyprland};
@@ -117,58 +121,57 @@ struct App {
     filtered: Vec<usize>,
     selected: usize,
     should_hide: bool,
-    /// Set once `special:launcher` has already been dismissed as part of
-    /// activating an entry (focusing a window, or spawning an app). Tells
-    /// `hide_and_reset` not to toggle the special workspace a second time.
-    dismissed_special: bool,
     loaded: bool,
-    was_focused: bool,
     held_key: Option<(egui::Key, std::time::Instant)>,
     matcher: Matcher,
     needs_reload: Arc<AtomicBool>,
     _hypr_thread: Option<std::thread::JoinHandle<()>>,
     scroll_momentum: ScrollMomentum,
+    /// Surface width and maximum height, in logical pixels. Width is fixed;
+    /// the rendered height grows with the result list up to `max_size.1`.
     max_size: (f32, f32),
-    monitor_size: (f32, f32),
-    last_height: f32,
     usage: Arc<Mutex<UsageLog>>,
     // Caches
     ghost_text_cache: String,
     display_names: HashMap<usize, String>,
     last_content_width: f32,
-    /// Icon textures keyed by source path. Each `load_entries` call would
-    /// otherwise re-upload the same ~200 icons via `ctx.load_texture` (which
-    /// always allocates a fresh GPU texture — there is no by-name caching
-    /// inside egui), and dropping the old `TextureHandle`s only queues the
-    /// frees for the next frame, so rapid reloads overlap two full sets of
-    /// textures. Persisting handles here means the GPU set stays bounded by
-    /// the installed-app count.
+    /// Icon textures keyed by source path. Within one pop-up each
+    /// `load_entries` would otherwise re-upload the same ~200 icons via
+    /// `ctx.load_texture` (which always allocates a fresh GPU texture — there
+    /// is no by-name caching inside egui), and dropping the old
+    /// `TextureHandle`s only queues the frees for the next frame, so rapid
+    /// reloads overlap two full sets of textures. Persisting handles here keeps
+    /// the GPU set bounded by the installed-app count. The egui context is
+    /// rebuilt with each pop-up, so this is cleared on hide (handles from a
+    /// dropped context are stale).
     icon_cache: HashMap<PathBuf, egui::TextureHandle>,
 }
 
 impl App {
     fn new() -> Self {
-        let eframe_size = hyprland::window_size(0.382, 0.618, (300.0, 400.0));
-        // Store max size in hyprland logical coords (matches egui screen_rect)
-        let max_size = (eframe_size.0 * 2.0, eframe_size.1 * 2.0);
-        let monitor_size = hyprland::monitor_logical_size();
+        // Surface dimensions in logical pixels: width = 0.382 of the monitor,
+        // height capped at 0.618. (The old eframe path computed half these and
+        // relied on eframe's 2x HiDPI scaling; layer-shell `set_size` is in
+        // logical pixels directly, so use the monitor logical size as-is.)
+        let (mon_w, mon_h) = hyprland::monitor_logical_size();
+        let max_size = if mon_w > 0.0 && mon_h > 0.0 {
+            (mon_w * 0.382, mon_h * 0.618)
+        } else {
+            (600.0, 800.0)
+        };
         Self {
             query: String::new(),
             entries: Vec::new(),
             filtered: Vec::new(),
             selected: 0,
             should_hide: false,
-            dismissed_special: false,
             loaded: false,
-            was_focused: false,
             held_key: None,
             matcher: Matcher::new(Config::DEFAULT),
             needs_reload: Arc::new(AtomicBool::new(false)),
             _hypr_thread: None,
             scroll_momentum: ScrollMomentum::new(),
             max_size,
-            monitor_size,
-            last_height: 0.0,
             usage: Arc::new(Mutex::new(UsageLog::load())),
             ghost_text_cache: String::new(),
             display_names: HashMap::new(),
@@ -177,10 +180,9 @@ impl App {
         }
     }
 
-    fn setup_hyprland_events(&mut self, ctx: &Context) {
+    fn setup_hyprland_events(&mut self) {
         let needs_reload = self.needs_reload.clone();
         let usage = self.usage.clone();
-        let ctx = ctx.clone();
 
         let mut active_class: Option<String> = None;
         let mut focused_at: f64 = 0.0;
@@ -190,13 +192,14 @@ impl App {
             // constantly (every browser tab switch, every terminal prompt) and
             // load_entries is heavy. Stale titles on Window entries are a
             // minor display issue; reloading on every title change was the
-            // driver of unbounded memory growth.
+            // driver of unbounded memory growth. The `needs_reload` flag is
+            // consumed by the event loop's next frame (it polls ~60x/sec while
+            // visible), so no context-repaint nudge is needed here.
             if line.starts_with("openwindow>>")
                 || line.starts_with("closewindow>>")
                 || line.starts_with("movewindow>>")
             {
                 needs_reload.store(true, Ordering::SeqCst);
-                ctx.request_repaint();
             } else if let Some(rest) = line.strip_prefix("activewindow>>") {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -463,16 +466,10 @@ impl App {
                 Entry::Desktop { exec, terminal, .. } => {
                     let parts = desktop::parse_exec(exec);
                     if let Some((bin, args)) = parts.split_first() {
-                        // Dismiss `special:launcher` *before* spawning. The
-                        // launcher window lives on the special workspace, so
-                        // while it is shown the special workspace is the
-                        // active one — a window mapped now would land there.
-                        // Toggle it off synchronously so the user's real
-                        // workspace is active by the time the app maps; an
-                        // async toggle would race the spawn and the new
-                        // window would still appear on special:launcher.
-                        hyprland::dispatch(r#"hl.dsp.workspace.toggle_special("launcher")"#);
-                        self.dismissed_special = true;
+                        // The overlay floats over the user's real workspace
+                        // (no special workspace to dismiss any more), so the
+                        // spawned app maps there directly. The harness unmaps
+                        // the overlay once this returns and `should_hide` is set.
                         if *terminal {
                             let term = env::var("TERMINAL").unwrap_or("kitty".into());
                             let term_bin = term.split_whitespace().next().unwrap_or("kitty");
@@ -495,13 +492,16 @@ impl App {
                 }
                 Entry::Window { address, .. } => {
                     hyprland::dispatch(&format!(r#"hl.dsp.focus({{ window = "address:{address}" }})"#));
-                    self.dismissed_special = true;
                 }
             }
         }
         self.should_hide = true;
     }
 
+    /// Reset transient state when the overlay is dismissed. The harness has
+    /// already unmapped the surface; here we persist usage, clear the query,
+    /// and drop the (now stale, context-bound) icon textures so the next
+    /// pop-up rebuilds them against its fresh egui context.
     fn hide_and_reset(&mut self) {
         if let Ok(mut usage) = self.usage.lock() {
             usage.save();
@@ -510,13 +510,24 @@ impl App {
         self.selected = 0;
         self.filtered = self.default_order();
         self.should_hide = false;
-        if !self.dismissed_special {
-            hyprland::dispatch_async(r#"hl.dsp.workspace.toggle_special("launcher")"#);
+        self.loaded = false;
+        self.icon_cache.clear();
+        self.display_names.clear();
+        for e in &mut self.entries {
+            let (Entry::Desktop { icon, .. } | Entry::Window { icon, .. }) = e;
+            *icon = None;
         }
-        self.dismissed_special = false;
     }
 
-    fn render(&mut self, ctx: &Context) {
+    /// Draw one frame and return the desired total surface height in logical
+    /// pixels. The harness diffs this against the live surface height and
+    /// issues a `set_size` when it changes — the top-anchored auto-grow that
+    /// `hyprland::resize_anchored` used to provide.
+    fn render(&mut self, ctx: &Context) -> f32 {
+        // The 1px gold outline + rounded corners that Hyprland window rules
+        // used to paint; a layer surface has no server-side decorations.
+        common::popup_border(ctx);
+
         if self.entries.is_empty() {
             self.load_entries(ctx);
         }
@@ -566,7 +577,7 @@ impl App {
                 }
             }
         }
-        if activate { self.activate(); return; }
+        if activate { self.activate(); return self.max_size.1; }
 
         // Input panel
         let ghost = if self.ghost_text_cache.is_empty() { None } else { Some(self.ghost_text_cache.as_str()) };
@@ -581,8 +592,10 @@ impl App {
         }
         let input_response = input_panel.response;
 
-        // List panel
-        CentralPanel::default()
+        // List panel. Its closure returns the desired total surface height so
+        // the harness can resize the layer surface (top-anchored, so the input
+        // row stays put as the list grows).
+        let panel = CentralPanel::default()
             .frame(common::panel_frame())
             .show(ctx, |ui: &mut Ui| {
                 let content_width = ui.available_width();
@@ -590,7 +603,7 @@ impl App {
                 let header_height = input_response.response.rect.height();
                 let spacing_y = ui.spacing().item_spacing.y;
 
-                // Auto-resize window to fit content
+                // Fit the surface to the visible rows, up to the height budget.
                 let num_items = self.filtered.len().min(MAX_VISIBLE_ITEMS);
                 let list_height = if num_items > 0 {
                     num_items as f32 * row_height + (num_items - 1) as f32 * spacing_y
@@ -600,18 +613,6 @@ impl App {
                     0.0
                 };
                 let target_height = (header_height + list_height).min(self.max_size.1);
-                if (target_height - self.last_height).abs() > 1.0 {
-                    self.last_height = target_height;
-                    // Top-anchored: pin the input at a fixed Y as the list grows,
-                    // instead of letting the resize recentroid (which would slide
-                    // the input vertically each keystroke).
-                    hyprland::resize_anchored(
-                        "launcher",
-                        self.max_size.0 as i32, target_height as i32,
-                        self.monitor_size.0, self.monitor_size.1,
-                        common::Y_ANCHOR_RATIO,
-                    );
-                }
 
                 let visible_height = (self.max_size.1 - header_height).max(row_height);
                 let scroll_to_selected = down || up;
@@ -715,64 +716,62 @@ impl App {
                         self.activate();
                     }
                 }
+
+                target_height
             });
+
+        panel.inner
     }
 }
 
-impl eframe::App for App {
-    fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
-        [0.0, 0.0, 0.0, 0.0]
+impl LayerApp for App {
+    fn width(&self) -> u32 {
+        self.max_size.0.round().max(1.0) as u32
     }
 
-    fn update(&mut self, ctx: &Context, _: &mut eframe::Frame) {
-        if ctx.input(|i| i.viewport().close_requested()) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.should_hide = true;
-        }
+    fn init_height(&self) -> u32 {
+        // Start at the input row's height; the first frame's auto-resize grows
+        // it to fit the default result list.
+        (common::input_size() + 16.0).round() as u32
+    }
 
-        if self._hypr_thread.is_none() {
-            self.setup_hyprland_events(ctx);
-        }
+    fn on_frame_init(&mut self, ctx: &Context) {
+        // The egui context is rebuilt per pop-up, so re-apply fonts/style each
+        // time.
+        common::setup_transparent_style(ctx);
+    }
 
-        let focused = ctx.input(|i| i.focused);
+    fn on_show(&mut self, ctx: &Context) {
+        // Fresh focus_history_ids: reload the window/app list on each pop-up,
+        // mirroring the old focus-gain reload.
+        self.load_entries(ctx);
+    }
 
-        // Render content when unfocused but skip input processing
-        if !focused {
-            self.was_focused = false;
-            self.render(ctx);
-            return;
-        }
-
-        // Reload entries on focus gain (fresh focus_history_ids)
-        if !self.was_focused {
-            self.was_focused = true;
-            self.load_entries(ctx);
-        } else if self.needs_reload.swap(false, Ordering::SeqCst) {
+    fn update_ui(&mut self, ctx: &Context) -> (f32, bool) {
+        if self.needs_reload.swap(false, Ordering::SeqCst) {
             self.load_entries(ctx);
         }
-
         if !self.loaded {
             self.load_entries(ctx);
         }
         self.scroll_momentum.update(ctx);
-        self.render(ctx);
-        if self.should_hide {
-            self.hide_and_reset();
-        }
+        let height = self.render(ctx);
+        (height, self.should_hide)
+    }
+
+    fn on_hidden(&mut self) {
+        self.hide_and_reset();
     }
 }
 
-fn main() -> eframe::Result<()> {
-    let (width, height) = hyprland::window_size(0.382, 0.618, (300.0, 400.0));
-
-    eframe::run_native(
-        "launcher",
-        common::window_options("launcher", width, height),
-        Box::new(|cc| {
-            common::setup_transparent_style(cc);
-            Ok(Box::new(App::new()))
-        }),
-    )
+fn main() {
+    let mut app = App::new();
+    // Subscribe to Hyprland events once for the process lifetime so window-list
+    // reloads and per-window focus-duration accounting keep running while the
+    // launcher idles between pop-ups (the old daemon tracked focus the whole
+    // time it was alive).
+    app.setup_hyprland_events();
+    layer::run("launcher", app);
 }
 
 fn load_icon(ctx: &Context, path: &PathBuf) -> Option<egui::TextureHandle> {

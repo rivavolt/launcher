@@ -163,7 +163,7 @@ impl eframe::App for App {
                         color: colors::GHOST_TEXT,
                         ..Default::default()
                     });
-                    let galley = ui.fonts(|f| f.layout_job(job));
+                    let galley = ui.fonts_mut(|f| f.layout_job(job));
                     ui.painter().galley(output.galley_pos, galley, egui::Color32::TRANSPARENT);
                 }
             });
@@ -253,7 +253,7 @@ fn main() {
         "picker",
         common::window_options("picker", width, height),
         Box::new(move |cc| {
-            common::setup_transparent_style(cc);
+            common::setup_transparent_style(&cc.egui_ctx);
             Ok(Box::new(App::new(items, flag_clone)))
         }),
     );
