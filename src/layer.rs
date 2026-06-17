@@ -31,7 +31,7 @@ use smithay_client_toolkit::reexports::client::Proxy;
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shell::wlr_layer::{Anchor, KeyboardInteractivity, Layer};
 use std::sync::atomic::{AtomicBool, Ordering};
-use wayapp::{Application, EguiAppData, EguiSurfaceState, WaylandEvent};
+use wayapp::{Application, EguiAppData, EguiGpu, EguiSurfaceState, WaylandEvent};
 
 /// Vertical position of the surface's top edge, as a fraction of the monitor
 /// height. Matches the old `move = monitor_h*0.236` window rule and
@@ -148,6 +148,12 @@ pub fn run<A: LayerApp>(namespace: &str, mut app: A) -> ! {
     let mut wl = Application::new();
     install_show_signal();
 
+    // Persistent GPU state, built once on the first pop-up and reused for every
+    // later one. Recreating the wgpu instance/adapter/device on each show is the
+    // dominant toggle cost; persisting it here is what keeps the device alive
+    // between pop-ups the way the old single persistent window did.
+    let mut gpu: Option<EguiGpu> = None;
+
     loop {
         // Idle: poll the Wayland fd with a 100 ms cap so the show flag is seen
         // promptly without a busy loop. Keeps the connection serviced so the
@@ -157,13 +163,18 @@ pub fn run<A: LayerApp>(namespace: &str, mut app: A) -> ! {
         }
         SHOW_REQUESTED.store(false, Ordering::SeqCst);
 
-        show_once(&mut wl, namespace, &mut app);
+        show_once(&mut wl, &mut gpu, namespace, &mut app);
         app.on_hidden();
     }
 }
 
 /// Map the overlay, run it until dismissed, then destroy it.
-fn show_once<A: LayerApp>(wl: &mut Application, namespace: &str, app: &mut A) {
+fn show_once<A: LayerApp>(
+    wl: &mut Application,
+    gpu: &mut Option<EguiGpu>,
+    namespace: &str,
+    app: &mut A,
+) {
     let (_mon_w, mon_h) = hyprland::monitor_logical_size();
     let width = app.width();
     let init_h = app.init_height();
@@ -190,7 +201,11 @@ fn show_once<A: LayerApp>(wl: &mut Application, namespace: &str, app: &mut A) {
     layer.set_exclusive_zone(0);
     layer.commit();
 
-    let mut egui_surface = EguiSurfaceState::new(wl, &layer, width, init_h);
+    // Build the persistent GPU state on the first pop-up (it needs a live
+    // surface to select the adapter against), then reuse it for every later
+    // pop-up so only the cheap swapchain surface and egui context are recreated.
+    let gpu_ref = gpu.get_or_insert_with(|| EguiGpu::new(wl, layer.wl_surface()));
+    let mut egui_surface = EguiSurfaceState::new_with_gpu(wl, gpu_ref, &layer, width, init_h);
 
     let mut has_focus = false;
     let mut ever_focused = false;
@@ -254,12 +269,17 @@ fn show_once<A: LayerApp>(wl: &mut Application, namespace: &str, app: &mut A) {
             break;
         }
 
-        // Keep frames flowing at the compositor's rate. wayapp only re-requests
-        // a frame when egui emitted output events, but the apps animate (key
-        // repeat, scroll momentum, the delete fade) and rely on a steady
-        // repaint, the way the old eframe `request_repaint` loop did. A frame
-        // request coalesces with any already pending, so this is cheap.
-        egui_surface.request_frame();
+        // Request the next frame callback only when egui is actually animating
+        // (key repeat, scroll momentum, the delete fade) or a widget asked to
+        // be repainted. The compositor then drives the next render at its own
+        // vsync rate via WaylandEvent::Frame. Previously this fired every loop
+        // iteration unconditionally, committing a fresh frame callback ~60+
+        // times a second even at rest; that flood of commits is what made
+        // input and rendering lag. Input/configure events still wake the loop
+        // and render on their own, so static frames need no polling.
+        if egui_surface.wants_repaint() {
+            egui_surface.request_frame();
+        }
     }
 
     // Destroying the LayerSurface unmaps the overlay. The egui Context inside
