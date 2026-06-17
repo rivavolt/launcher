@@ -116,6 +116,14 @@
               description = "Launcher (wlr-layer-shell overlay)";
               wantedBy = [ "hyprland-session.target" ];
               partOf = [ "hyprland-session.target" ];
+              # User services are not restarted by `nixos-rebuild switch` the way
+              # system services are, so a rebuilt binary would otherwise keep
+              # running the previous store path until the next logout. Keying a
+              # restartTrigger on the package makes the switch restart the daemon
+              # whenever the binary changes, so the running process always matches
+              # the deployed build. The daemon idles between pop-ups, so the
+              # restart is invisible unless an overlay happens to be mapped.
+              restartTriggers = [ launcherPkg ];
               path = lib.mkForce [];
               environment = {
                 GIO_EXTRA_MODULES = "${pkgs.dconf.lib}/lib/gio/modules:${pkgs.glib-networking}/lib/gio/modules";
@@ -137,6 +145,7 @@
               description = "Clipboard (wlr-layer-shell overlay)";
               wantedBy = [ "hyprland-session.target" ];
               partOf = [ "hyprland-session.target" ];
+              restartTriggers = [ launcherPkg ];
               path = [ pkgs.hyprland pkgs.wl-clipboard ];
               serviceConfig = {
                 ExecStart = "${launcherPkg}/bin/clipboard";
@@ -150,6 +159,7 @@
               description = "Clipboard daemon";
               wantedBy = [ "hyprland-session.target" ];
               partOf = [ "hyprland-session.target" ];
+              restartTriggers = [ launcherPkg ];
               # clipd shells out to wl-copy to persist each new entry onto the
               # live selection so it outlives the app that copied it.
               path = [ pkgs.wl-clipboard ];
