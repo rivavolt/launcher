@@ -176,6 +176,40 @@ impl ClipboardDb {
         Ok(entries)
     }
 
+    /// Like [`list`](Self::list), but does not pull full image blobs into
+    /// memory: for `image/*` rows only the first 64 KiB is returned (enough for
+    /// `imagesize` to read the dimensions), while text rows keep their full
+    /// content. The `clipboard` overlay used to hold every history entry's full
+    /// bytes resident — hundreds of MB of screenshots — which swapped out and
+    /// made the pop-up slow to fault back in; it now keeps only metadata and a
+    /// lazily built thumbnail, re-reading the full blob by id (see
+    /// [`get`](Self::get)) when a preview or paste actually needs it.
+    pub fn list_meta(&self, limit: i64) -> rusqlite::Result<Vec<Entry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id,
+                    CASE WHEN mime LIKE 'image/%' THEN substr(content, 1, 65536) ELSE content END,
+                    content_hash, mime, source_app, created_at, last_used, pinned
+             FROM entries
+             ORDER BY last_used DESC
+             LIMIT ?1"
+        )?;
+
+        let entries = stmt.query_map(params![limit], |row| {
+            Ok(Entry {
+                id: row.get(0)?,
+                content: row.get(1)?,
+                content_hash: row.get(2)?,
+                mime: row.get(3)?,
+                source_app: row.get(4)?,
+                created_at: row.get(5)?,
+                last_used: row.get(6)?,
+                pinned: row.get::<_, i64>(7)? != 0,
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+
+        Ok(entries)
+    }
+
     /// Search entries by text content (case-insensitive substring match).
     pub fn search(&self, query: &str, limit: i64) -> rusqlite::Result<Vec<Entry>> {
         let pattern = format!("%{}%", query);

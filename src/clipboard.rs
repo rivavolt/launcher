@@ -204,30 +204,46 @@ impl App {
     }
 
     fn ensure_texture(&mut self, ctx: &Context, idx: usize) {
-        let e = &self.entries[idx];
-        if e.is_image && e.texture.is_none() && !self.failed_textures.contains(&idx) {
-            if let Ok(img) = image::load_from_memory(&e.content) {
-                let full = img.to_rgba8();
-                let full_size = [full.width() as usize, full.height() as usize];
-                let tex = ctx.load_texture(
-                    format!("clip_{}", e.id),
-                    egui::ColorImage::from_rgba_unmultiplied(full_size, &full.into_raw()),
-                    egui::TextureOptions::LINEAR,
-                );
+        let (is_image, needs_texture, id) = {
+            let e = &self.entries[idx];
+            (e.is_image, e.texture.is_none(), e.id)
+        };
+        if !is_image || !needs_texture || self.failed_textures.contains(&idx) {
+            return;
+        }
 
-                let thumb_img = img.resize(128, 128, image::imageops::FilterType::CatmullRom).to_rgba8();
-                let thumb_size = [thumb_img.width() as usize, thumb_img.height() as usize];
-                let thumb = ctx.load_texture(
-                    format!("clip_{}_thumb", e.id),
-                    egui::ColorImage::from_rgba_unmultiplied(thumb_size, &thumb_img.into_raw()),
-                    egui::TextureOptions::LINEAR,
-                );
+        // The full image bytes aren't held in memory (see load_entries); re-read
+        // them from the DB by id only when this row actually needs its textures.
+        let bytes = ClipboardDb::open_default()
+            .ok()
+            .and_then(|db| db.get(id).ok().flatten())
+            .map(|row| row.content);
+        let Some(bytes) = bytes else {
+            self.failed_textures.insert(idx);
+            return;
+        };
 
-                self.entries[idx].texture = Some(tex);
-                self.entries[idx].thumb = Some(thumb);
-            } else {
-                self.failed_textures.insert(idx);
-            }
+        if let Ok(img) = image::load_from_memory(&bytes) {
+            let full = img.to_rgba8();
+            let full_size = [full.width() as usize, full.height() as usize];
+            let tex = ctx.load_texture(
+                format!("clip_{}", id),
+                egui::ColorImage::from_rgba_unmultiplied(full_size, &full.into_raw()),
+                egui::TextureOptions::LINEAR,
+            );
+
+            let thumb_img = img.resize(128, 128, image::imageops::FilterType::CatmullRom).to_rgba8();
+            let thumb_size = [thumb_img.width() as usize, thumb_img.height() as usize];
+            let thumb = ctx.load_texture(
+                format!("clip_{}_thumb", id),
+                egui::ColorImage::from_rgba_unmultiplied(thumb_size, &thumb_img.into_raw()),
+                egui::TextureOptions::LINEAR,
+            );
+
+            self.entries[idx].texture = Some(tex);
+            self.entries[idx].thumb = Some(thumb);
+        } else {
+            self.failed_textures.insert(idx);
         }
     }
 
@@ -237,7 +253,7 @@ impl App {
         self.last_ensured = None;
 
         let db_entries = ClipboardDb::open_default()
-            .and_then(|db| db.list(500))
+            .and_then(|db| db.list_meta(500))
             .unwrap_or_default();
 
         self.entries = db_entries.into_iter().map(|e| {
@@ -254,7 +270,13 @@ impl App {
             };
             Entry {
                 id: e.id,
-                content: e.content,
+                // Don't retain image bytes: list_meta only fetched a 64 KiB
+                // header for images (consumed above for dims), and keeping even
+                // that across the whole history — let alone the full blobs we
+                // used to hold — is what bloated the idle daemon and made
+                // Super+C slow to page back in. Text stays inline; images
+                // re-read their full bytes from the DB by id on preview/paste.
+                content: if is_image { Vec::new() } else { e.content },
                 mime: e.mime,
                 source_app: e.source_app,
                 last_used: e.last_used,
@@ -290,21 +312,35 @@ impl App {
 
     fn activate(&mut self) {
         let Some(idx) = self.selected_entry_idx() else { return };
-        let e = &self.entries[idx];
+        let (is_image, id, mime) = {
+            let e = &self.entries[idx];
+            (e.is_image, e.id, e.mime.clone())
+        };
+
+        // Images aren't kept in memory (see load_entries), so re-read the blob
+        // from the DB to paste it; text content is small and still held inline.
+        let content: Vec<u8> = if is_image {
+            match ClipboardDb::open_default().ok().and_then(|db| db.get(id).ok().flatten()) {
+                Some(row) => row.content,
+                None => return,
+            }
+        } else {
+            self.entries[idx].content.clone()
+        };
 
         let mut cmd = Command::new("wl-copy");
-        if e.is_image {
-            cmd.arg("--type").arg(&e.mime);
+        if is_image {
+            cmd.arg("--type").arg(&mime);
         }
         if let Ok(mut wl) = cmd.stdin(Stdio::piped()).spawn() {
             if let Some(mut stdin) = wl.stdin.take() {
-                let _ = stdin.write_all(&e.content);
+                let _ = stdin.write_all(&content);
             }
             let _ = wl.wait();
         }
 
         if let Ok(db) = ClipboardDb::open_default() {
-            let _ = db.update_last_used(e.id);
+            let _ = db.update_last_used(id);
         }
 
         self.should_hide = true;
