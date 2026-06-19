@@ -121,6 +121,13 @@ struct App {
     /// and after a focused image's texture loads (its row just grew).
     scroll_pending: bool,
     last_selected: usize,
+    /// One SQLite handle reused within a show instead of opening a fresh
+    /// connection — with its pragma + `CREATE TABLE IF NOT EXISTS` re-check —
+    /// on every list, blob fetch, and update. Opening per arrow-key on the
+    /// render path (ensure_texture) was blocking I/O. Opened lazily on first
+    /// query, dropped in hide_and_reset so the next show reopens against the
+    /// current file; WAL readers see clipd's committed writes.
+    db: Option<ClipboardDb>,
 }
 
 impl App {
@@ -153,7 +160,18 @@ impl App {
             deleting: None,
             scroll_pending: false,
             last_selected: 0,
+            db: None,
         }
+    }
+
+    /// The clipboard DB handle for this show, opened on first use. Returns None
+    /// only if the database can't be opened at all — callers then degrade the
+    /// same way the old per-call path did (no thumbnail / no paste).
+    fn db(&mut self) -> Option<&ClipboardDb> {
+        if self.db.is_none() {
+            self.db = ClipboardDb::open_default().ok();
+        }
+        self.db.as_ref()
     }
 
     /// Get the entry index for the currently selected display item
@@ -223,9 +241,10 @@ impl App {
         let max_h = (self.max_image_preview_height() * ppp).ceil() as u32;
 
         // The full image bytes aren't held in memory (see load_entries); re-read
-        // them from the DB by id only when this row actually needs its textures.
-        let bytes = ClipboardDb::open_default()
-            .ok()
+        // them by id from the shared connection only when this row needs its
+        // textures — no per-call SQLite open on the render path.
+        let bytes = self
+            .db()
             .and_then(|db| db.get(id).ok().flatten())
             .map(|row| row.content);
         let Some(bytes) = bytes else {
@@ -269,8 +288,9 @@ impl App {
         self.failed_textures.clear();
         self.last_ensured = None;
 
-        let db_entries = ClipboardDb::open_default()
-            .and_then(|db| db.list_meta(500))
+        let db_entries = self
+            .db()
+            .and_then(|db| db.list_meta(500).ok())
             .unwrap_or_default();
 
         self.entries = db_entries.into_iter().map(|e| {
@@ -337,7 +357,7 @@ impl App {
         // Images aren't kept in memory (see load_entries), so re-read the blob
         // from the DB to paste it; text content is small and still held inline.
         let content: Vec<u8> = if is_image {
-            match ClipboardDb::open_default().ok().and_then(|db| db.get(id).ok().flatten()) {
+            match self.db().and_then(|db| db.get(id).ok().flatten()) {
                 Some(row) => row.content,
                 None => return,
             }
@@ -356,7 +376,7 @@ impl App {
             let _ = wl.wait();
         }
 
-        if let Ok(db) = ClipboardDb::open_default() {
+        if let Some(db) = self.db() {
             let _ = db.update_last_used(id);
         }
 
@@ -374,6 +394,9 @@ impl App {
         self.loaded = false;
         self.last_ensured = None;
         self.failed_textures.clear();
+        // Drop the SQLite handle between pops: the next show reopens it on first
+        // query, so a deleted/rebuilt DB is never read through a stale fd.
+        self.db = None;
         for e in &mut self.entries {
             e.texture = None;
             e.thumb = None;
@@ -383,10 +406,10 @@ impl App {
 
     fn delete(&mut self, ctx: &Context) {
         let Some(idx) = self.selected_entry_idx() else { return };
-        let e = &self.entries[idx];
+        let id = self.entries[idx].id;
 
-        if let Ok(db) = ClipboardDb::open_default() {
-            let _ = db.delete(e.id);
+        if let Some(db) = self.db() {
+            let _ = db.delete(id);
         }
 
         self.load_entries(ctx);
