@@ -212,6 +212,16 @@ impl App {
             return;
         }
 
+        // Cap the preview texture at the pixel box it can actually be drawn in.
+        // The expanded row scales the image fit-to-width with aspect preserved,
+        // never taller than half the surface, so a native 4K screenshot would
+        // otherwise upload a ~33 MB RGBA8 texture (plus a ~33 MB transient CPU
+        // buffer) for a preview only ~300 px tall. pixels_per_point converts the
+        // logical box to physical pixels so the downscaled texture stays crisp.
+        let ppp = ctx.pixels_per_point();
+        let max_w = ((self.row_content_width() - EXPAND_PAD_X * 2.0).max(1.0) * ppp).ceil() as u32;
+        let max_h = (self.max_image_preview_height() * ppp).ceil() as u32;
+
         // The full image bytes aren't held in memory (see load_entries); re-read
         // them from the DB by id only when this row actually needs its textures.
         let bytes = ClipboardDb::open_default()
@@ -224,7 +234,14 @@ impl App {
         };
 
         if let Ok(img) = image::load_from_memory(&bytes) {
-            let full = img.to_rgba8();
+            // Downscale to the preview box before upload — only when the image
+            // exceeds it and the box is non-degenerate; aspect is preserved so
+            // the on-screen size is identical, just at the resolution we draw.
+            let full = if max_w >= 16 && max_h >= 16 && (img.width() > max_w || img.height() > max_h) {
+                img.resize(max_w, max_h, image::imageops::FilterType::CatmullRom).to_rgba8()
+            } else {
+                img.to_rgba8()
+            };
             let full_size = [full.width() as usize, full.height() as usize];
             let tex = ctx.load_texture(
                 format!("clip_{}", id),
