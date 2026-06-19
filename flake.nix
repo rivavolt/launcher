@@ -145,6 +145,15 @@
                 # are overridden, which is exactly the behaviour we want here.
                 Restart = "always";
                 RestartSec = 2;
+                # Cap the blast radius. This overlay once ran unbounded to ~8 GB
+                # and swap-thrashed the 16 GB laptop into a halt. The warm
+                # working set is ~65 MB; MemoryHigh throttles a regression into
+                # reclaim, and MemoryMax — with Restart=always — kills and
+                # respawns a runaway instead of letting it take the whole session
+                # down. Both sit far above normal use, far below box exhaustion.
+                # Same guard on clipboard/clipd below.
+                MemoryHigh = "768M";
+                MemoryMax = "1G";
                 PassEnvironment = "PATH HYPRLAND_INSTANCE_SIGNATURE XDG_RUNTIME_DIR WAYLAND_DISPLAY TERMINAL XDG_DATA_DIRS DBUS_SESSION_BUS_ADDRESS HOME";
               };
             };
@@ -159,6 +168,8 @@
                 ExecStart = "${launcherPkg}/bin/clipboard";
                 Restart = "always";
                 RestartSec = 2;
+                MemoryHigh = "512M";
+                MemoryMax = "768M";
                 PassEnvironment = "HYPRLAND_INSTANCE_SIGNATURE XDG_RUNTIME_DIR WAYLAND_DISPLAY XDG_CACHE_HOME HOME";
               };
             };
@@ -175,6 +186,8 @@
                 ExecStart = "${launcherPkg}/bin/clipd";
                 Restart = "always";
                 RestartSec = 2;
+                MemoryHigh = "512M";
+                MemoryMax = "768M";
                 PassEnvironment = "HYPRLAND_INSTANCE_SIGNATURE XDG_RUNTIME_DIR WAYLAND_DISPLAY XDG_CACHE_HOME HOME";
               };
             };
