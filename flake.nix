@@ -135,7 +135,15 @@
                 # list / focus dispatch / event subscription) comes from the
                 # inherited PATH below.
                 ExecStart = "${launcherPkg}/bin/launcher";
-                Restart = "on-failure";
+                # Session-lifetime idle daemon — self-heal from any death.
+                # on-failure does NOT restart on SIGTERM (systemd counts
+                # SIGTERM/HUP/INT/PIPE as a clean exit), and earlyoom sends
+                # SIGTERM under memory pressure — that combination left the
+                # clipboard overlay dead and silently broke its show keybind.
+                # always still respects `systemctl stop` and session teardown
+                # (partOf=), so only blunt kills (OOM-TERM, crash, stray pkill)
+                # are overridden, which is exactly the behaviour we want here.
+                Restart = "always";
                 RestartSec = 2;
                 PassEnvironment = "PATH HYPRLAND_INSTANCE_SIGNATURE XDG_RUNTIME_DIR WAYLAND_DISPLAY TERMINAL XDG_DATA_DIRS DBUS_SESSION_BUS_ADDRESS HOME";
               };
@@ -149,7 +157,7 @@
               path = [ pkgs.hyprland pkgs.wl-clipboard ];
               serviceConfig = {
                 ExecStart = "${launcherPkg}/bin/clipboard";
-                Restart = "on-failure";
+                Restart = "always";
                 RestartSec = 2;
                 PassEnvironment = "HYPRLAND_INSTANCE_SIGNATURE XDG_RUNTIME_DIR WAYLAND_DISPLAY XDG_CACHE_HOME HOME";
               };
@@ -165,7 +173,7 @@
               path = [ pkgs.wl-clipboard ];
               serviceConfig = {
                 ExecStart = "${launcherPkg}/bin/clipd";
-                Restart = "on-failure";
+                Restart = "always";
                 RestartSec = 2;
                 PassEnvironment = "HYPRLAND_INSTANCE_SIGNATURE XDG_RUNTIME_DIR WAYLAND_DISPLAY XDG_CACHE_HOME HOME";
               };
