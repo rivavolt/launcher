@@ -145,6 +145,13 @@ struct App {
     /// rebuilt with each pop-up, so this is cleared on hide (handles from a
     /// dropped context are stale).
     icon_cache: HashMap<PathBuf, egui::TextureHandle>,
+    /// Memoized icon path index (icon name → file). `build_icon_index` walks
+    /// every theme/size/category directory and `cache_svgs` shells out to
+    /// `magick`; both are far too expensive to redo on every window event, and
+    /// the icon set is static for the session — so it's built once and reused
+    /// across `load_entries` calls. (Distinct from `icon_cache`, which holds
+    /// the GPU textures; this is the path index that feeds it.)
+    icon_index: Option<HashMap<String, PathBuf>>,
 }
 
 impl App {
@@ -177,6 +184,7 @@ impl App {
             display_names: HashMap::new(),
             last_content_width: 0.0,
             icon_cache: HashMap::new(),
+            icon_index: None,
         }
     }
 
@@ -226,14 +234,22 @@ impl App {
 
     fn load_entries(&mut self, ctx: &Context) {
         let old_selected = self.selected;
-        let mut icon_index = desktop::build_icon_index();
-        desktop::cache_svgs(&mut icon_index);
+        // Memoized icon index — see the field doc. build_icon_index walks every
+        // theme/size/category dir and cache_svgs spawns `magick` per uncached
+        // SVG, both too costly to redo on each window add/remove/move. Built
+        // once, then reused; taken out of self for the borrow and put back.
+        let icon_index = self.icon_index.take().unwrap_or_else(|| {
+            let mut idx = desktop::build_icon_index();
+            desktop::cache_svgs(&mut idx);
+            idx
+        });
         let desktop_entries = desktop::collect_entries();
         let wmclass_icons = desktop::wmclass_icon_map(&desktop_entries, &icon_index);
 
         self.entries = self.collect_hyprland_windows(ctx, &icon_index, &wmclass_icons);
         let new_desktop = self.convert_desktop_entries(ctx, &icon_index, desktop_entries);
         self.entries.extend(new_desktop);
+        self.icon_index = Some(icon_index);
 
         self.filter();
         self.selected = old_selected.min(self.filtered.len().saturating_sub(1));
