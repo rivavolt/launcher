@@ -126,6 +126,11 @@ struct App {
     matcher: Matcher,
     needs_reload: Arc<AtomicBool>,
     _hypr_thread: Option<std::thread::JoinHandle<()>>,
+    /// Window list fetched the moment a show is requested (via `prefetch`), so
+    /// the ~13 ms client-list IPC round-trip overlaps the surface handshake
+    /// instead of blocking the first frame. Consumed by the first `load_entries`
+    /// of the pop-up; `None` afterwards, where later reloads query directly.
+    pending_clients: Option<std::thread::JoinHandle<Vec<hyprland::Client>>>,
     scroll_momentum: ScrollMomentum,
     /// Surface width and maximum height, in logical pixels. Width is fixed;
     /// the rendered height grows with the result list up to `max_size.1`.
@@ -177,6 +182,7 @@ impl App {
             matcher: Matcher::new(Config::DEFAULT),
             needs_reload: Arc::new(AtomicBool::new(false)),
             _hypr_thread: None,
+            pending_clients: None,
             scroll_momentum: ScrollMomentum::new(),
             max_size,
             usage: Arc::new(Mutex::new(UsageLog::load())),
@@ -273,7 +279,15 @@ impl App {
         icon_index: &HashMap<String, PathBuf>,
         wmclass_icons: &HashMap<String, PathBuf>,
     ) -> Vec<Entry> {
-        hyprland::clients()
+        // Use the list prefetched at show time if present (its IPC round-trip
+        // overlapped the surface handshake); otherwise query directly — the path
+        // taken by later in-pop-up reloads.
+        let clients = self
+            .pending_clients
+            .take()
+            .and_then(|h| h.join().ok())
+            .unwrap_or_else(hyprland::clients);
+        clients
             .into_iter()
             .filter(|c| !c.class.is_empty() && c.class != "launcher")
             .filter(|c| !c.workspace.name.starts_with("special:"))
@@ -785,6 +799,14 @@ impl LayerApp for App {
 
     fn on_hidden(&mut self) {
         self.hide_and_reset();
+    }
+
+    fn prefetch(&mut self) {
+        // Fetch the window list off-thread the moment a show is requested, so the
+        // IPC round-trip overlaps the surface handshake. The first load_entries of
+        // this pop-up joins it (see `pending_clients`). Any unjoined prior handle
+        // is dropped (detached) here.
+        self.pending_clients = Some(std::thread::spawn(hyprland::clients));
     }
 }
 

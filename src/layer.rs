@@ -64,6 +64,12 @@ pub trait LayerApp {
     /// context-bound texture caches, the way `hide_and_reset` used to.
     fn on_hidden(&mut self) {}
 
+    /// Kick off any slow data fetch (e.g. the window list) the instant a show is
+    /// requested, so it runs concurrently with the surface-map handshake instead
+    /// of blocking the first frame. Called once per pop-up, just before the
+    /// surface is created.
+    fn prefetch(&mut self) {}
+
     /// Fixed surface width in logical pixels.
     fn width(&self) -> u32;
 
@@ -173,6 +179,10 @@ pub fn run<A: LayerApp>(namespace: &str, mut app: A) -> ! {
             dispatch_with_timeout(&mut wl, 100);
         }
         SHOW_REQUESTED.store(false, Ordering::SeqCst);
+
+        // Start the window-list fetch now so it overlaps the surface handshake
+        // below rather than blocking the first frame.
+        app.prefetch();
 
         show_once(
             &mut wl,
