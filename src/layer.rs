@@ -32,7 +32,7 @@ use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shell::wlr_layer::{Anchor, KeyboardInteractivity, Layer};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use wayapp::{Application, EguiAppData, EguiGpu, EguiSurfaceState, WaylandEvent};
+use wayapp::{Application, EguiAppData, EguiGpu, EguiSurfaceState, EguiWgpuRenderer, WaylandEvent};
 
 /// Vertical position of the surface's top edge, as a fraction of the monitor
 /// height. Matches the old `move = monitor_h*0.236` window rule and
@@ -47,8 +47,9 @@ const TOP_MARGIN_RATIO: f32 = common::Y_ANCHOR_RATIO;
 /// auto-grow the apps used to drive through `resize_anchored`. Setting the
 /// returned `should_hide` (or losing keyboard focus) dismisses the surface.
 pub trait LayerApp {
-    /// Setup that needs an egui context (fonts, styles). Runs on the first
-    /// frame of each pop-up, since the context is rebuilt per surface.
+    /// Setup that needs an egui context (fonts, styles). Runs once, on the first
+    /// frame of the first pop-up; the context now persists across pop-ups, so
+    /// re-applying fonts here every show would rebuild the font atlas needlessly.
     fn on_frame_init(&mut self, _ctx: &Context) {}
 
     /// Called once per pop-up when the surface gains keyboard focus, mirroring
@@ -154,6 +155,15 @@ pub fn run<A: LayerApp>(namespace: &str, mut app: A) -> ! {
     // dominant toggle cost; persisting it here is what keeps the device alive
     // between pop-ups the way the old single persistent window did.
     let mut gpu: Option<EguiGpu> = None;
+    // Persistent egui renderer (context + font atlas), built once on the first
+    // pop-up and reused for every later one — same rationale as `gpu` above.
+    // Rebuilding it per show re-rasterized the whole font atlas on the first
+    // frame, which was the dominant pop-up open latency.
+    let mut renderer: Option<EguiWgpuRenderer> = None;
+    // With the context now persistent, the fonts/style hook (`on_frame_init`)
+    // must fire exactly once for the process — re-applying fonts per show would
+    // rebuild the atlas and bring the latency back. Carried across pop-ups here.
+    let mut frame_init_pending = true;
 
     loop {
         // Idle: poll the Wayland fd with a 100 ms cap so the show flag is seen
@@ -164,7 +174,14 @@ pub fn run<A: LayerApp>(namespace: &str, mut app: A) -> ! {
         }
         SHOW_REQUESTED.store(false, Ordering::SeqCst);
 
-        show_once(&mut wl, &mut gpu, namespace, &mut app);
+        show_once(
+            &mut wl,
+            &mut gpu,
+            &mut renderer,
+            &mut frame_init_pending,
+            namespace,
+            &mut app,
+        );
         app.on_hidden();
     }
 }
@@ -173,6 +190,8 @@ pub fn run<A: LayerApp>(namespace: &str, mut app: A) -> ! {
 fn show_once<A: LayerApp>(
     wl: &mut Application,
     gpu: &mut Option<EguiGpu>,
+    renderer: &mut Option<EguiWgpuRenderer>,
+    frame_init_pending: &mut bool,
     namespace: &str,
     app: &mut A,
 ) {
@@ -206,12 +225,16 @@ fn show_once<A: LayerApp>(
     // surface to select the adapter against), then reuse it for every later
     // pop-up so only the cheap swapchain surface and egui context are recreated.
     let gpu_ref = gpu.get_or_insert_with(|| EguiGpu::new(wl, layer.wl_surface()));
-    let mut egui_surface = EguiSurfaceState::new_with_gpu(wl, gpu_ref, &layer, width, init_h);
+    // Reuse the persistent renderer across pop-ups (warm font atlas → instant
+    // first frame); the surface state hands it back via `into_renderer` below.
+    let mut egui_surface =
+        EguiSurfaceState::new_with_gpu(wl, gpu_ref, renderer.take(), &layer, width, init_h);
 
     let mut has_focus = false;
     let mut ever_focused = false;
-    // One-shot hooks, advanced only when a frame actually renders.
-    let mut frame_init_pending = true;
+    // One-shot hooks, advanced only when a frame actually renders. `frame_init`
+    // persists across pop-ups (fonts/style apply once for the process, since the
+    // context is now persistent); `show` is per pop-up.
     let mut show_pending = true;
     let mut last_height = 0u32;
     // When egui asked for a scheduled (non-immediate) repaint — chiefly the
@@ -259,7 +282,7 @@ fn show_once<A: LayerApp>(
             app,
             desired_height: last_height as f32,
             should_hide: false,
-            needs_frame_init: frame_init_pending,
+            needs_frame_init: *frame_init_pending,
             // Fire `on_show` on the first render after focus is gained.
             needs_show: show_pending && ever_focused,
             rendered: false,
@@ -268,7 +291,7 @@ fn show_once<A: LayerApp>(
 
         // Advance the one-shots only if `ui()` ran this pass.
         if bridge.rendered {
-            frame_init_pending = bridge.needs_frame_init;
+            *frame_init_pending = bridge.needs_frame_init;
             if ever_focused {
                 show_pending = bridge.needs_show;
             }
@@ -317,9 +340,10 @@ fn show_once<A: LayerApp>(
         }
     }
 
-    // Destroying the LayerSurface unmaps the overlay. The egui Context inside
-    // `egui_surface` is dropped with it; the app clears its caches in on_hidden.
-    drop(egui_surface);
+    // Destroying the LayerSurface unmaps the overlay. Salvage the persistent
+    // renderer (warm context + atlas) first so the next pop-up reuses it; the
+    // app clears its own transient caches in on_hidden.
+    *renderer = Some(egui_surface.into_renderer());
     drop(layer);
     let _ = wl.conn.flush();
 }

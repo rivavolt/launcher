@@ -188,7 +188,13 @@ impl<T: Into<Kind> + Clone> EguiSurfaceState<T> {
     pub fn new(app: &Application, t: T, width: u32, height: u32) -> Self {
         let kind = t.clone().into();
         let gpu = EguiGpu::new(app, kind.get_wl_surface());
-        Self::new_with_gpu(app, &gpu, t, width, height)
+        Self::new_with_gpu(app, &gpu, None, t, width, height)
+    }
+
+    /// Take back the persistent egui renderer (context + warm font atlas) as the
+    /// surface tears down, so the next pop-up reuses it instead of rebuilding it.
+    pub fn into_renderer(self) -> EguiWgpuRenderer {
+        self.renderer
     }
 
     /// Build surface state reusing a persistent [`EguiGpu`]. Only the swapchain
@@ -197,6 +203,7 @@ impl<T: Into<Kind> + Clone> EguiSurfaceState<T> {
     pub fn new_with_gpu(
         app: &Application,
         gpu: &EguiGpu,
+        renderer: Option<EguiWgpuRenderer>,
         t: T,
         width: u32,
         height: u32,
@@ -205,7 +212,12 @@ impl<T: Into<Kind> + Clone> EguiSurfaceState<T> {
         let wl_surface = kind.get_wl_surface();
         let surface = gpu.create_surface(app, wl_surface);
 
-        let renderer = EguiWgpuRenderer::new(&gpu.device, gpu.output_format, None, 1);
+        // Reuse a persistent renderer (egui context + warm font atlas) across
+        // pop-ups when the caller supplies one; build it only on the first show.
+        // A fresh renderer re-rasterizes the whole font atlas on its first frame
+        // (tens of ms), which was the dominant pop-up open latency.
+        let renderer = renderer
+            .unwrap_or_else(|| EguiWgpuRenderer::new(&gpu.device, gpu.output_format, None, 1));
         let clipboard = unsafe { Clipboard::new(app.conn.display().id().as_ptr() as *mut _) };
         let input_state = WaylandToEguiInput::new(clipboard);
 
