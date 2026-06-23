@@ -1,7 +1,7 @@
 //! Hyprland IPC: monitor info, clients, dispatch, event subscription
 
 use serde::Deserialize;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::process::Command;
 use std::{env, thread};
@@ -31,9 +31,26 @@ pub struct Client {
     pub pinned: bool,
 }
 
+/// Send a request to Hyprland's IPC request socket (`.socket.sock`) and return
+/// the raw response. This is exactly what `hyprctl` does internally, minus the
+/// process fork+exec — a direct socket round-trip is ~1 ms versus ~10 ms to spawn
+/// `hyprctl`, which matters because the monitor and client queries sit on the
+/// launcher's show/toggle critical path. `cmd` is the wire form, e.g.
+/// `j/monitors` or `j/clients` (the `j/` prefix asks for JSON).
+fn request(cmd: &str) -> Option<String> {
+    let sig = env::var("HYPRLAND_INSTANCE_SIGNATURE").ok()?;
+    let runtime = env::var("XDG_RUNTIME_DIR").unwrap_or("/tmp".into());
+    let path = format!("{}/hypr/{}/.socket.sock", runtime, sig);
+    let mut stream = UnixStream::connect(path).ok()?;
+    stream.write_all(cmd.as_bytes()).ok()?;
+    let mut buf = String::new();
+    stream.read_to_string(&mut buf).ok()?;
+    Some(buf)
+}
+
 pub fn monitor() -> Option<Monitor> {
-    let out = Command::new("hyprctl").args(["monitors", "-j"]).output().ok()?;
-    let monitors: Vec<Monitor> = serde_json::from_slice(&out.stdout).ok()?;
+    let resp = request("j/monitors")?;
+    let monitors: Vec<Monitor> = serde_json::from_str(&resp).ok()?;
     monitors.into_iter().next()
 }
 
@@ -73,11 +90,10 @@ pub fn resize_anchored(class: &str, width: i32, height: i32, monitor_w: f32, mon
 
 /// Get sorted list of Hyprland clients (by focus history)
 pub fn clients() -> Vec<Client> {
-    let Some(out) = Command::new("hyprctl").args(["clients", "-j"]).output().ok() else {
+    let Some(resp) = request("j/clients") else {
         return vec![];
     };
-    if !out.status.success() { return vec![]; }
-    let mut clients: Vec<Client> = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    let mut clients: Vec<Client> = serde_json::from_str(&resp).unwrap_or_default();
     clients.sort_by_key(|c| c.focus_history_id);
     clients
 }
