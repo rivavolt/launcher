@@ -318,66 +318,53 @@ pub fn handle_navigation_keys(
     }
 
     ctx.input(|i| {
-        // Check for key releases
+        // A release of any nav key ends the held-repeat.
         for event in &i.events {
             if let egui::Event::Key { key, pressed: false, .. } = event {
-                match key {
-                    egui::Key::ArrowDown | egui::Key::ArrowUp |
-                    egui::Key::J | egui::Key::K | egui::Key::N | egui::Key::P => {
-                        *held_key = None;
-                    }
-                    _ => {}
+                if matches!(
+                    key,
+                    egui::Key::ArrowDown | egui::Key::ArrowUp
+                        | egui::Key::J | egui::Key::K | egui::Key::N | egui::Key::P
+                ) {
+                    *held_key = None;
                 }
             }
         }
 
-        // Check for key presses
+        // A press steps once immediately and arms the repeat to first fire after
+        // REPEAT_DELAY_MS. `held_key`'s instant is the next-due time, pushed out
+        // one REPEAT_INTERVAL_MS each time it fires below.
         for event in &i.events {
             if let egui::Event::Key { key, pressed: true, modifiers, .. } = event {
-                match key {
-                    egui::Key::ArrowDown => {
-                        down = true;
-                        *held_key = Some((egui::Key::ArrowDown, now));
-                    }
-                    egui::Key::ArrowUp => {
-                        up = true;
-                        *held_key = Some((egui::Key::ArrowUp, now));
-                    }
-                    egui::Key::J if modifiers.ctrl => {
-                        down = true;
-                        *held_key = Some((egui::Key::ArrowDown, now));
-                    }
-                    egui::Key::K if modifiers.ctrl => {
-                        up = true;
-                        *held_key = Some((egui::Key::ArrowUp, now));
-                    }
-                    egui::Key::N if modifiers.ctrl => {
-                        down = true;
-                        *held_key = Some((egui::Key::ArrowDown, now));
-                    }
-                    egui::Key::P if modifiers.ctrl => {
-                        up = true;
-                        *held_key = Some((egui::Key::ArrowUp, now));
-                    }
-                    _ => {}
+                let dir = match key {
+                    egui::Key::ArrowDown => Some(egui::Key::ArrowDown),
+                    egui::Key::ArrowUp => Some(egui::Key::ArrowUp),
+                    egui::Key::J | egui::Key::N if modifiers.ctrl => Some(egui::Key::ArrowDown),
+                    egui::Key::K | egui::Key::P if modifiers.ctrl => Some(egui::Key::ArrowUp),
+                    _ => None,
+                };
+                if let Some(dir) = dir {
+                    if dir == egui::Key::ArrowDown { down = true; } else { up = true; }
+                    *held_key = Some((dir, now + std::time::Duration::from_millis(REPEAT_DELAY_MS as u64)));
                 }
             }
         }
     });
 
-    // Manual key repeat
-    if let Some((key, start_time)) = *held_key {
-        let elapsed_ms = now.duration_since(start_time).as_millis();
-        if elapsed_ms > REPEAT_DELAY_MS {
-            let repeat_count = (elapsed_ms - REPEAT_DELAY_MS) / REPEAT_INTERVAL_MS;
-            let last_repeat = (elapsed_ms - REPEAT_DELAY_MS).saturating_sub(REPEAT_INTERVAL_MS) / REPEAT_INTERVAL_MS;
-            if repeat_count > last_repeat || elapsed_ms < REPEAT_DELAY_MS + REPEAT_INTERVAL_MS {
-                match key {
-                    egui::Key::ArrowDown => down = true,
-                    egui::Key::ArrowUp => up = true,
-                    _ => {}
-                }
+    // Held-key auto-repeat: fire once each time the due instant is reached, then
+    // push the due instant out by one interval. Gating on a single moving
+    // deadline makes the rate exactly one step per REPEAT_INTERVAL_MS regardless
+    // of frame rate. The old code recomputed two almost-equal interval counts and
+    // compared them, which was true on essentially every frame past the delay, so
+    // it fired ~60 steps/s and sent the selection racing to the end of the list.
+    if let Some((key, due)) = *held_key {
+        if now >= due {
+            match key {
+                egui::Key::ArrowDown => down = true,
+                egui::Key::ArrowUp => up = true,
+                _ => {}
             }
+            *held_key = Some((key, now + std::time::Duration::from_millis(REPEAT_INTERVAL_MS as u64)));
         }
         ctx.request_repaint();
     }
