@@ -1,7 +1,7 @@
 //! Picker: dmenu-like line selector using the launcher's egui UI.
 //! Reads lines from stdin, shows fuzzy-searchable list, prints selected line to stdout.
 
-use eframe::egui::{self, CentralPanel, Context, RichText, ScrollArea, FontFamily, FontId, Ui};
+use eframe::egui::{self, CentralPanel, Context, ScrollArea, FontFamily, FontId, Ui};
 use launcher::common::{self, colors, handle_navigation_keys, virtual_list};
 use launcher::scroll::ScrollMomentum;
 use launcher::hyprland;
@@ -105,6 +105,9 @@ impl eframe::App for App {
             return;
         }
 
+        // Same 1px gold outline + rounded corners the launcher/clipboard draw,
+        // so the picker reads as the same surface.
+        common::popup_border(ctx);
         self.scroll_momentum.update(ctx);
 
         let max_sel = self.filtered.len().saturating_sub(1);
@@ -136,37 +139,21 @@ impl eframe::App for App {
             return;
         }
 
-        let input_response = egui::TopBottomPanel::top("input")
-            .frame(common::input_frame())
-            .show(ctx, |ui: &mut Ui| {
-                let input_font = FontId::new(common::input_size(), FontFamily::Proportional);
-                let old_query = self.query.clone();
-                let input = egui::TextEdit::singleline(&mut self.query)
-                    .font(input_font.clone())
-                    .text_color(colors::TEXT_PRIMARY)
-                    .hint_text(RichText::new("Search...").color(colors::TEXT_MUTED))
-                    .frame(false)
-                    .desired_width(ui.available_width());
-                let output = input.show(ui);
-                output.response.request_focus();
-                if self.query != old_query { self.filter(); }
-
-                if !self.ghost_text_cache.is_empty() && !self.query.is_empty() {
-                    let mut job = egui::text::LayoutJob::default();
-                    job.append(&self.query, 0.0, egui::TextFormat {
-                        font_id: input_font.clone(),
-                        color: egui::Color32::TRANSPARENT,
-                        ..Default::default()
-                    });
-                    job.append(&self.ghost_text_cache, 0.0, egui::TextFormat {
-                        font_id: input_font,
-                        color: colors::GHOST_TEXT,
-                        ..Default::default()
-                    });
-                    let galley = ui.fonts_mut(|f| f.layout_job(job));
-                    ui.painter().galley(output.galley_pos, galley, egui::Color32::TRANSPARENT);
-                }
-            });
+        // Shared input panel: the `>` prompt, focus handling, ghost completion
+        // and Ctrl+U — identical to the launcher and clipboard.
+        let ghost = (!self.ghost_text_cache.is_empty()).then_some(self.ghost_text_cache.as_str());
+        let input_panel = common::input_panel(ctx, &mut self.query, "Search...", ghost);
+        // The picker is a normal toplevel window, so egui's `i.focused` — which
+        // `input_panel` keys its focus on — isn't reliably set the way it is for
+        // the layer-shell launcher/clipboard. Force keyboard focus onto the query
+        // field every frame so typing always lands here (the dmenu contract); the
+        // field consumed the keys at its `show()` this frame before `input_panel`
+        // surrendered, so re-requesting here just holds focus for the next frame.
+        ctx.memory_mut(|m| m.request_focus(input_panel.text_edit_id));
+        if input_panel.changed || input_panel.cleared {
+            self.filter();
+        }
+        let input_response = input_panel.response;
 
         CentralPanel::default()
             .frame(common::panel_frame())
@@ -197,6 +184,13 @@ impl eframe::App for App {
 
                 let filtered = &self.filtered;
                 let items = &self.items;
+                let query = &self.query;
+                // Start row text on the launcher's text column — aligned under the
+                // input text, past the `>` prompt's icon-sized container + gap — so
+                // the query field and the rows share one left edge.
+                let text_x = (text_size * 0.5).round()
+                    + common::icon_container()
+                    + (text_size * 0.625).round();
 
                 let scroll_output = ScrollArea::vertical()
                     .max_height(visible_height)
@@ -212,14 +206,19 @@ impl eframe::App for App {
                                 let idx = filtered[i];
                                 let item = &items[idx];
                                 let sel = i == self.selected;
-                                let text_color = if sel { colors::TEXT_PRIMARY } else { colors::TEXT_SECONDARY };
+                                let text_color = common::row_text_color(sel);
                                 let text_y = row_rect.min.y + (row_height - text_size) / 2.0;
-                                ui.painter().text(
-                                    egui::pos2(12.0, text_y),
-                                    egui::Align2::LEFT_TOP,
+                                // Highlight the matched query characters in gold,
+                                // exactly like the launcher's result rows.
+                                let matches = common::match_indices(item, query);
+                                common::paint_highlighted(
+                                    ui,
+                                    egui::pos2(text_x, text_y),
                                     item,
-                                    text_font.clone(),
+                                    &text_font,
                                     text_color,
+                                    colors::ACCENT,
+                                    &matches,
                                 );
                             },
                         )
