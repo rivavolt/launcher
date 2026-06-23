@@ -515,9 +515,11 @@ impl App {
     }
 
     /// Reset transient state when the overlay is dismissed. The harness has
-    /// already unmapped the surface; here we persist usage, clear the query,
-    /// and drop the (now stale, context-bound) icon textures so the next
-    /// pop-up rebuilds them against its fresh egui context.
+    /// already unmapped the surface; here we persist usage, clear the query, and
+    /// drop the per-entry icon handles (entries are rebuilt on the next show).
+    /// The `icon_cache` itself is kept: it is keyed by icon file path and the
+    /// egui context now persists across pop-ups, so the decoded textures stay
+    /// valid and the next show reuses them instead of re-decoding every PNG.
     fn hide_and_reset(&mut self) {
         if let Ok(mut usage) = self.usage.lock() {
             usage.save();
@@ -527,7 +529,6 @@ impl App {
         self.filtered = self.default_order();
         self.should_hide = false;
         self.loaded = false;
-        self.icon_cache.clear();
         self.display_names.clear();
         for e in &mut self.entries {
             let (Entry::Desktop { icon, .. } | Entry::Window { icon, .. }) = e;
@@ -752,15 +753,22 @@ impl LayerApp for App {
     }
 
     fn on_frame_init(&mut self, ctx: &Context) {
-        // The egui context is rebuilt per pop-up, so re-apply fonts/style each
-        // time.
+        // Fonts/style are applied once for the process: the egui context now
+        // persists across pop-ups (see LayerApp::on_frame_init), so re-applying
+        // them per show would re-rasterize the font atlas needlessly.
         common::setup_transparent_style(ctx);
     }
 
     fn on_show(&mut self, ctx: &Context) {
-        // Fresh focus_history_ids: reload the window/app list on each pop-up,
-        // mirroring the old focus-gain reload.
-        self.load_entries(ctx);
+        // Reload on focus only if the pre-focus first frame hasn't already
+        // populated the list this pop-up. The window query (`hyprctl clients`,
+        // a subprocess) is the dominant per-show cost, and it otherwise ran
+        // twice — once from `update_ui`'s `!loaded` path before focus, once here
+        // on focus. A window opening while the launcher is up still refreshes
+        // through the `needs_reload` event path, so freshness is unaffected.
+        if !self.loaded {
+            self.load_entries(ctx);
+        }
     }
 
     fn update_ui(&mut self, ctx: &Context) -> (f32, bool) {
