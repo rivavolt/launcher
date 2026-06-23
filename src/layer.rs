@@ -31,6 +31,7 @@ use smithay_client_toolkit::reexports::client::Proxy;
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shell::wlr_layer::{Anchor, KeyboardInteractivity, Layer};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 use wayapp::{Application, EguiAppData, EguiGpu, EguiSurfaceState, WaylandEvent};
 
 /// Vertical position of the surface's top edge, as a fraction of the monitor
@@ -213,10 +214,33 @@ fn show_once<A: LayerApp>(
     let mut frame_init_pending = true;
     let mut show_pending = true;
     let mut last_height = 0u32;
+    // When egui asked for a scheduled (non-immediate) repaint — chiefly the
+    // ~0.5 s text-cursor blink — this holds the instant it falls due, so the loop
+    // sleeps until then instead of polling at a fixed rate.
+    let mut next_repaint: Option<Instant> = None;
 
     loop {
-        dispatch_with_timeout(wl, 16);
+        // Block until the next scheduled repaint or until Wayland input arrives,
+        // whichever is first; with nothing scheduled, wake about once a second to
+        // keep the connection serviced. Replaces a fixed 16 ms poll that spun the
+        // loop at 60 Hz the entire time the overlay was mapped.
+        let timeout_ms = match next_repaint {
+            Some(t) => t
+                .saturating_duration_since(Instant::now())
+                .as_millis()
+                .min(1000) as u64,
+            None => 1000,
+        };
+        dispatch_with_timeout(wl, timeout_ms);
         let events = wl.take_wayland_events();
+
+        // A scheduled repaint has come due: ask the compositor for one frame
+        // callback so the surface re-renders once, then re-evaluates below how
+        // long to sleep next.
+        if next_repaint.is_some_and(|t| Instant::now() >= t) {
+            egui_surface.request_frame();
+            next_repaint = None;
+        }
 
         for ev in &events {
             match ev {
@@ -269,16 +293,27 @@ fn show_once<A: LayerApp>(
             break;
         }
 
-        // Request the next frame callback only when egui is actually animating
-        // (key repeat, scroll momentum, the delete fade) or a widget asked to
-        // be repainted. The compositor then drives the next render at its own
-        // vsync rate via WaylandEvent::Frame. Previously this fired every loop
-        // iteration unconditionally, committing a fresh frame callback ~60+
-        // times a second even at rest; that flood of commits is what made
-        // input and rendering lag. Input/configure events still wake the loop
-        // and render on their own, so static frames need no polling.
-        if egui_surface.wants_repaint() {
-            egui_surface.request_frame();
+        // Drive the next frame off egui's own repaint schedule — the way eframe's
+        // winit loop did — instead of committing a frame callback every iteration.
+        // A zero delay means egui is animating (key repeat, scroll momentum, the
+        // delete fade) and wants the next frame at vsync, so re-arm the callback
+        // now and let WaylandEvent::Frame pace it. A finite delay — chiefly the
+        // ~0.5 s text-cursor blink — schedules a single wake then rather than a
+        // 60 fps spin; the earlier gate keyed off a boolean `has_requested_repaint`
+        // that was already true for that pending blink, so it never actually
+        // gated and the surface re-rendered every frame while merely focused.
+        // Duration::MAX means nothing is pending, so idle until input. Only act on
+        // a pass that rendered — otherwise repaint_delay is stale from before.
+        if bridge.rendered {
+            let delay = egui_surface.repaint_delay();
+            if delay.is_zero() {
+                egui_surface.request_frame();
+                next_repaint = None;
+            } else if delay < Duration::MAX {
+                next_repaint = Some(Instant::now() + delay);
+            } else {
+                next_repaint = None;
+            }
         }
     }
 

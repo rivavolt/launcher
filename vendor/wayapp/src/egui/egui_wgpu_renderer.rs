@@ -15,16 +15,29 @@ use egui_wgpu::wgpu::Queue;
 use egui_wgpu::wgpu::StoreOp;
 use egui_wgpu::wgpu::TextureFormat;
 use egui_wgpu::wgpu::TextureView;
+use std::time::Duration;
 
 pub struct EguiWgpuRenderer {
     context: Context,
     renderer: Renderer,
     frame_started: bool,
+    /// Egui's `ViewportOutput::repaint_delay` from the last `end_frame_and_draw`:
+    /// how long until egui next wants to be repainted. `ZERO` = animating now,
+    /// a finite value = a scheduled wake (e.g. the ~0.5 s cursor blink), `MAX` =
+    /// nothing pending. The event loop sleeps on this instead of a boolean
+    /// `has_requested_repaint`, which is true for any pending delay and so turned
+    /// the 0.5 s blink into a 60 fps busy-repaint.
+    last_repaint_delay: Duration,
 }
 
 impl EguiWgpuRenderer {
     pub fn context(&self) -> &Context {
         &self.context
+    }
+
+    /// Time until egui wants the next repaint, as of the last frame drawn.
+    pub fn repaint_delay(&self) -> Duration {
+        self.last_repaint_delay
     }
 
     pub fn context_mut(&mut self) -> &mut Context {
@@ -54,6 +67,7 @@ impl EguiWgpuRenderer {
             context: egui_context,
             renderer: egui_renderer,
             frame_started: false,
+            last_repaint_delay: Duration::MAX,
         }
     }
 
@@ -81,6 +95,16 @@ impl EguiWgpuRenderer {
         self.ppp(screen_descriptor.pixels_per_point);
 
         let full_output = self.context.end_pass();
+
+        // Record how long egui wants before its next repaint so the event loop
+        // can sleep exactly that long instead of spinning. The smallest delay
+        // across viewports wins (there is only the root here).
+        self.last_repaint_delay = full_output
+            .viewport_output
+            .values()
+            .map(|v| v.repaint_delay)
+            .min()
+            .unwrap_or(Duration::MAX);
 
         let tris = self
             .context

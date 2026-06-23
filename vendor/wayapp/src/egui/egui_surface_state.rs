@@ -344,15 +344,17 @@ impl<T: Into<Kind> + Clone> EguiSurfaceState<T> {
         wl_surface.commit();
     }
 
-    /// Whether egui asked to be repainted again after the last `render`, i.e.
-    /// an animation is in flight (key-repeat highlight, scroll momentum, the
-    /// delete fade) or a widget called `request_repaint`. The event loop uses
-    /// this to keep frames flowing only while something actually animates,
-    /// instead of committing a fresh frame callback every iteration — the
-    /// latter floods the compositor with commits and is what made input and
-    /// rendering feel laggy.
-    pub fn wants_repaint(&self) -> bool {
-        self.renderer.context().has_requested_repaint()
+    /// How long until egui wants the next repaint, from the last `render`.
+    /// `Duration::ZERO` means an animation is in flight (key-repeat highlight,
+    /// scroll momentum, the delete fade) and wants the next frame immediately; a
+    /// finite value is a scheduled wake such as the ~0.5 s text-cursor blink;
+    /// `Duration::MAX` means nothing is pending and the surface can idle until
+    /// input. The event loop drives frame callbacks off this rather than the
+    /// boolean `has_requested_repaint`, which is true for *any* pending delay and
+    /// so collapsed the 0.5 s blink into a 60 fps busy-repaint that floods the
+    /// compositor with commits and makes input and rendering lag.
+    pub fn repaint_delay(&self) -> std::time::Duration {
+        self.renderer.repaint_delay()
     }
 
     fn render(&mut self, ui: &mut impl EguiAppData) -> PlatformOutput {
