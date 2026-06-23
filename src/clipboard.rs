@@ -56,7 +56,6 @@ fn relative_time(unix_secs: i64) -> String {
 fn compact_time(unix_secs: i64) -> String {
     let now = now_secs();
     let diff = now - unix_secs;
-    if diff < 0 { return "now".into(); }
     if diff < 60 { return "now".into(); }
     if diff < 3600 { return format!("{}m", diff / 60); }
     if diff < 86400 { return format!("{}h", diff / 3600); }
@@ -385,8 +384,10 @@ impl App {
 
     /// Reset transient state when the overlay is dismissed. The harness has
     /// already unmapped the surface; here we clear the query and drop the
-    /// (now stale, context-bound) entry textures so the next pop-up rebuilds
-    /// them against its fresh egui context.
+    /// per-entry textures. The entry list is rebuilt on the next show and the
+    /// clipboard keeps no id-keyed texture cache, so they reload lazily then —
+    /// the egui context persists across pop-ups (see the layer.rs module doc), so
+    /// this is a simplicity choice, not a requirement.
     fn hide_and_reset(&mut self) {
         self.query.clear();
         self.selected = 0;
@@ -943,7 +944,9 @@ impl LayerApp for App {
     }
 
     fn on_frame_init(&mut self, ctx: &Context) {
-        // The egui context is rebuilt per pop-up, so re-apply fonts/style.
+        // Fonts/style are applied once for the process: the egui context now
+        // persists across pop-ups (see the layer.rs module doc), so this hook
+        // fires once rather than per show.
         common::setup_transparent_style(ctx);
     }
 

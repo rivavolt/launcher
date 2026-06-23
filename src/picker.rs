@@ -73,16 +73,11 @@ impl App {
     }
 
     fn update_ghost_text(&mut self) {
-        self.ghost_text_cache.clear();
-        if self.query.is_empty() { return; }
-        if let Some(&idx) = self.filtered.first() {
-            let name = &self.items[idx];
-            let name_lower = name.to_lowercase();
-            let query_lower = self.query.to_lowercase();
-            if name_lower.starts_with(&query_lower) {
-                self.ghost_text_cache = name.chars().skip(self.query.chars().count()).collect();
-            }
-        }
+        self.ghost_text_cache = self
+            .filtered
+            .first()
+            .map(|&idx| common::ghost_suffix(&self.query, &self.items[idx]))
+            .unwrap_or_default();
     }
 
     fn activate(&mut self) {

@@ -400,18 +400,24 @@ impl App {
                             .unwrap_or(0)
                     };
 
-                    let primary_score = score_pat(&primary, &pattern, &mut self.matcher);
-                    let primary_jw = if primary_score == 0 {
-                        primary.iter()
+                    // Max jaro-winkler similarity of `primary_token` against any
+                    // field, scaled to 0..1000 and gated at 850 (used only as a
+                    // fuzzy fallback when nucleo scored 0).
+                    let jw_max = |fields: &[&str]| {
+                        fields
+                            .iter()
                             .map(|s| (jaro_winkler(primary_token, &s.to_lowercase()) * 1000.0) as u32)
-                            .filter(|&s| s >= 850).max().unwrap_or(0)
-                    } else { 0 };
+                            .filter(|&s| s >= 850)
+                            .max()
+                            .unwrap_or(0)
+                    };
+
+                    let primary_score = score_pat(&primary, &pattern, &mut self.matcher);
+                    let primary_jw = if primary_score == 0 { jw_max(&primary) } else { 0 };
 
                     let secondary_score = (score_pat(&secondary, &pattern, &mut self.matcher) as f32 * 0.3) as u32;
                     let secondary_jw = if secondary_score == 0 {
-                        (secondary.iter()
-                            .map(|s| (jaro_winkler(primary_token, &s.to_lowercase()) * 1000.0) as u32)
-                            .filter(|&s| s >= 850).max().unwrap_or(0) as f32 * 0.3) as u32
+                        (jw_max(&secondary) as f32 * 0.3) as u32
                     } else { 0 };
 
                     let nucleo_score = primary_score.max(secondary_score);
@@ -466,18 +472,11 @@ impl App {
     }
 
     fn update_ghost_text(&mut self) {
-        self.ghost_text_cache.clear();
-        if self.query.is_empty() {
-            return;
-        }
-        if let Some(&idx) = self.filtered.first() {
-            let name = self.entries[idx].name();
-            let name_lower = name.to_lowercase();
-            let query_lower = self.query.to_lowercase();
-            if name_lower.starts_with(&query_lower) {
-                self.ghost_text_cache = name.chars().skip(self.query.chars().count()).collect();
-            }
-        }
+        self.ghost_text_cache = self
+            .filtered
+            .first()
+            .map(|&idx| common::ghost_suffix(&self.query, self.entries[idx].name()))
+            .unwrap_or_default();
     }
 
     fn activate(&mut self) {

@@ -5,7 +5,6 @@ use eframe::epaint::Mesh;
 use std::sync::OnceLock;
 
 pub const GOLDEN: f32 = 1.618;
-pub const MAX_VISIBLE_ITEMS: usize = 12;
 /// Y offset (as fraction of monitor height) where the input row sits.
 /// 0.236 = 1 - 1/golden, matches the spawn rule in flake.nix nixosModule.
 pub const Y_ANCHOR_RATIO: f32 = 0.236;
@@ -52,7 +51,6 @@ pub mod colors {
     pub const TEXT_SUBTITLE: Color32 = Color32::from_rgb(70, 70, 70);
     pub const TEXT_MUTED: Color32 = Color32::from_rgb(45, 45, 45);
     pub const GHOST_TEXT: Color32 = Color32::from_rgb(35, 35, 35);
-    pub const BG_PREVIEW: Color32 = Color32::from_rgb(8, 8, 8);
     pub const ACCENT: Color32 = Color32::from_rgb(200, 160, 60);
     pub const ACCENT_BAR: f32 = 1.5;
 }
@@ -189,21 +187,10 @@ pub fn input_panel(
     InputPanelOutput { response, changed, cleared, text_edit_id }
 }
 
-/// Preview pane frame
-pub fn preview_frame() -> Frame {
-    Frame {
-        fill: colors::BG_PREVIEW,
-        corner_radius: egui::CornerRadius::same(4),
-        inner_margin: egui::Margin::same(8),
-        ..Frame::NONE
-    }
-}
-
 
 
 pub struct VirtualListOutput {
     pub clicked: Option<usize>,
-    pub selected_rect: Option<Rect>,
 }
 
 /// Render a virtualized list inside a ScrollArea closure.
@@ -218,7 +205,7 @@ pub fn virtual_list(
     mut render_row: impl FnMut(&mut Ui, usize, Rect),
 ) -> VirtualListOutput {
     if total_items == 0 {
-        return VirtualListOutput { clicked: None, selected_rect: None };
+        return VirtualListOutput { clicked: None };
     }
 
     let content_width = ui.available_width();
@@ -256,7 +243,6 @@ pub fn virtual_list(
     }
 
     let mut clicked = None;
-    let mut selected_rect = None;
 
     for i in render_start..render_end {
         let row_y = ui.cursor().min.y;
@@ -280,7 +266,6 @@ pub fn virtual_list(
                 );
                 ui.painter().rect_filled(bar, 0.0, colors::ACCENT);
             }
-            selected_rect = Some(row_rect);
         } else if response.hovered() {
             ui.painter().rect_filled(row_rect, 0.0, colors::BG_HOVER);
         }
@@ -299,7 +284,7 @@ pub fn virtual_list(
         ui.add_space(skip_h);
     }
 
-    VirtualListOutput { clicked, selected_rect }
+    VirtualListOutput { clicked }
 }
 
 /// Handle navigation keys and return (down, up) flags
@@ -438,6 +423,17 @@ pub fn empty_state(ui: &mut Ui) {
     ui.painter().text(center, egui::Align2::CENTER_CENTER, "No results", font, colors::TEXT_MUTED);
 }
 
+/// The ghost-completion suffix of `candidate` for `query`: when `candidate`
+/// starts with `query` (case-insensitive), the part of `candidate` after the
+/// query's characters; otherwise empty. Drives the dimmed inline completion in
+/// the input field.
+pub fn ghost_suffix(query: &str, candidate: &str) -> String {
+    if query.is_empty() || !candidate.to_lowercase().starts_with(&query.to_lowercase()) {
+        return String::new();
+    }
+    candidate.chars().skip(query.chars().count()).collect()
+}
+
 /// Find character indices where the query matches as substring or fuzzy
 pub fn match_indices(text: &str, query: &str) -> Vec<usize> {
     if query.is_empty() { return vec![]; }
@@ -503,16 +499,6 @@ pub fn paint_highlighted(
     }
     let galley = ui.fonts_mut(|f| f.layout_job(job));
     ui.painter().galley(pos, galley, Color32::TRANSPARENT);
-}
-
-/// Truncate string to max characters with ellipsis
-pub fn truncate(s: &str, max: usize) -> String {
-    let s = s.replace('\n', " ").replace('\t', " ");
-    if s.chars().count() > max {
-        s.chars().take(max - 1).collect::<String>() + "…"
-    } else {
-        s
-    }
 }
 
 /// Normalize clipboard text for list-row display:

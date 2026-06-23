@@ -18,11 +18,14 @@
 //! the picture the old toggle keybind no longer applies — the trigger becomes
 //! `pkill -USR1 <binary>`.
 //!
-//! The egui `Context` is rebuilt with each surface, so any `TextureHandle`s an
-//! app caches belong to one pop-up only; apps clear those caches in
-//! `on_hidden`. Within a single pop-up the caches still dedup the many reloads
-//! a visible session triggers, which is what bounded GPU memory in the first
-//! place.
+//! The egui `Context` and renderer now PERSIST across pop-ups (the harness
+//! salvages them via `into_renderer`; see `run`/`show_once`), so a
+//! `TextureHandle` an app caches stays valid for the process lifetime and can be
+//! reused across pop-ups instead of re-decoded each show — the launcher keeps
+//! its icon cache for exactly this. An app that still drops textures in
+//! `on_hidden` does so by choice (e.g. the clipboard rebuilds its entry list
+//! each show and keeps no id-keyed cache to re-associate them), not because the
+//! context changed.
 
 use crate::common;
 use crate::hyprland;

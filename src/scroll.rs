@@ -8,14 +8,13 @@ const STOP_VELOCITY: f32 = 10.0; // px/s (Firefox: 0.01 px/ms)
 
 pub struct ScrollMomentum {
     velocity: f32,
-    last_input: std::time::Instant,
     prev_frame: std::time::Instant,
 }
 
 impl ScrollMomentum {
     pub fn new() -> Self {
         let now = std::time::Instant::now();
-        Self { velocity: 0.0, last_input: now, prev_frame: now }
+        Self { velocity: 0.0, prev_frame: now }
     }
 
     /// Call each frame before any ScrollArea is shown.
@@ -28,7 +27,6 @@ impl ScrollMomentum {
 
         if raw.abs() > 0.5 {
             self.velocity = self.velocity * 0.5 + (raw / dt) * 0.5;
-            self.last_input = now;
             return;
         }
 
