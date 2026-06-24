@@ -177,6 +177,10 @@ struct App {
     // Caches
     ghost_text_cache: String,
     display_names: HashMap<usize, String>,
+    /// Truncated Window subtitles, cached width-keyed alongside `display_names`
+    /// (rebuilt in the same block). The name was cached but the subtitle wasn't,
+    /// so it was re-truncated (text layout + binary search) per row per frame.
+    display_subtitles: HashMap<usize, String>,
     last_content_width: f32,
     /// Icon textures keyed by source path. Within one pop-up each
     /// `load_entries` would otherwise re-upload the same ~200 icons via
@@ -226,6 +230,7 @@ impl App {
             usage: Arc::new(Mutex::new(UsageLog::load())),
             ghost_text_cache: String::new(),
             display_names: HashMap::new(),
+            display_subtitles: HashMap::new(),
             last_content_width: 0.0,
             icon_cache: HashMap::new(),
             icon_index: None,
@@ -379,9 +384,15 @@ impl App {
     }
 
     fn default_order(&self) -> Vec<usize> {
-        let usage = self.usage.lock().unwrap();
+        let class_scores = self.usage.lock().unwrap().class_scores();
         let mut scored: Vec<(f64, usize)> = (0..self.entries.len().min(50))
-            .map(|i| (usage.score(self.entries[i].name()), i))
+            .map(|i| {
+                let s = class_scores
+                    .get(&self.entries[i].name().to_lowercase())
+                    .copied()
+                    .unwrap_or(0.0);
+                (s, i)
+            })
             .collect();
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         scored.into_iter().map(|(_, i)| i).collect()
@@ -391,7 +402,13 @@ impl App {
         if self.query.is_empty() {
             self.filtered = self.default_order();
         } else {
-            let usage = self.usage.lock().unwrap();
+            // One pass each over the event/selection logs up front, then O(1)
+            // per-entry lookups below — instead of rescanning the whole log per
+            // entry per keystroke. Lock dropped immediately.
+            let (class_scores, query_scores) = {
+                let usage = self.usage.lock().unwrap();
+                (usage.class_scores(), usage.query_class_scores(&self.query))
+            };
             let query_lower = self.query.to_lowercase();
             let tokens: Vec<&str> = query_lower.split_whitespace().collect();
             let is_multi = tokens.len() > 1;
@@ -474,10 +491,12 @@ impl App {
                     { 5000 } else { 0 };
 
                     // Usage-based bonus: frecency score capped at 5000
-                    let usage_bonus: u32 = (usage.score(e.name()).min(50.0) * 100.0) as u32;
+                    let usage_bonus: u32 =
+                        (class_scores.get(&name_lower).copied().unwrap_or(0.0).min(50.0) * 100.0) as u32;
 
                     // Query-specific frecency: boost entries previously chosen for this query
-                    let query_bonus: u32 = (usage.query_score(&self.query, e.name()).min(10.0) * 500.0) as u32;
+                    let query_bonus: u32 =
+                        (query_scores.get(&name_lower).copied().unwrap_or(0.0).min(10.0) * 500.0) as u32;
 
                     let length_bonus: u32 = {
                         let ratio = primary_token.len() as f32 / name_lower.len().max(1) as f32;
@@ -689,12 +708,18 @@ impl App {
                 if (self.last_content_width - content_width).abs() > 1.0 || self.display_names.is_empty() {
                     self.last_content_width = content_width;
                     self.display_names.clear();
+                    self.display_subtitles.clear();
+                    let sub_avail = content_width - text_x - (icon_container() + row_padding() * 2.0);
                     for &idx in &self.filtered {
                         let e = &self.entries[idx];
                         let right_margin = if e.is_window() { icon_container() + row_padding() * 2.0 } else { row_padding() };
                         let available_width = content_width - text_x - right_margin;
                         let display_name = truncate_to_width(ui, e.name(), text_font.clone(), available_width);
                         self.display_names.insert(idx, display_name);
+                        if let Some(sub) = e.subtitle() {
+                            self.display_subtitles
+                                .insert(idx, truncate_to_width(ui, sub, text_font.clone(), sub_avail));
+                        }
                     }
                 }
 
@@ -704,6 +729,7 @@ impl App {
                     let filtered = &self.filtered;
                     let entries = &self.entries;
                     let display_names = &self.display_names;
+                    let display_subtitles = &self.display_subtitles;
                     let query = &self.query;
 
                     let scroll_output = ScrollArea::vertical()
@@ -740,13 +766,11 @@ impl App {
                                 let display_name = display_names.get(&idx).map(|s| s.as_str()).unwrap_or(e.name());
                                 let highlight = colors::ACCENT;
                                 if let Some(sub) = e.subtitle() {
-                                    let right_margin = icon_container() + row_padding() * 2.0;
-                                    let avail = content_width - text_x - right_margin;
-                                    let title_display = truncate_to_width(ui, sub, text_font.clone(), avail);
+                                    let title_display = display_subtitles.get(&idx).map(|s| s.as_str()).unwrap_or(sub);
                                     let total_h = text_size + line_gap + subtitle_size;
                                     let primary_y = row_y + (row_height - total_h) / 2.0;
-                                    let title_matches = common::match_indices(&title_display, query);
-                                    common::paint_highlighted(ui, egui::pos2(text_x, primary_y), &title_display, &text_font, text_color, highlight, &title_matches);
+                                    let title_matches = common::match_indices(title_display, query);
+                                    common::paint_highlighted(ui, egui::pos2(text_x, primary_y), title_display, &text_font, text_color, highlight, &title_matches);
                                     let sub_color = if sel { colors::TEXT_SECONDARY } else { colors::TEXT_SUBTITLE };
                                     let name_matches = common::match_indices(display_name, query);
                                     common::paint_highlighted(ui, egui::pos2(text_x, primary_y + text_size + line_gap), display_name, &subtitle_font, sub_color, highlight, &name_matches);
