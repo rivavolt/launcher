@@ -225,21 +225,21 @@ trap cleanup EXIT INT TERM
 #    WLR_BACKENDS=headless          → wlroots/Aquamarine creates no real output.
 #    WLR_LIBINPUT_NO_DEVICES=1      → don't require real input devices.
 #    XDG_RUNTIME_DIR=<isolated>     → fresh socket tree, unambiguous signature.
-#    WAYLAND_DISPLAY=<nested>       → the socket name the daemon will connect to.
 #    Unset HYPRLAND_INSTANCE_SIGNATURE so Hyprland mints a fresh one rather than
-#    inheriting the caller's.
+#    inheriting the caller's; unset WAYLAND_DISPLAY so it doesn't think it's a
+#    nested client of some parent display.
+#    Do NOT pass --socket: in Hyprland 0.54 that is half of the Wayland socket
+#    *handover* protocol and aborts unless --wayland-fd is given too ("launched
+#    with only one of --socket and --wayland-fd"). As a top-level compositor
+#    Hyprland auto-creates its own socket (wayland-1 in this empty runtime dir);
+#    we discover the real name once it has booted.
 # ----------------------------------------------------------------------------
-log "starting nested headless Hyprland (display=$NESTED_WD, runtime=$NESTED_RUNTIME)…"
-# `--socket "$NESTED_WD"` pins the Wayland socket name explicitly (verified flag)
-# so the daemon's connect_to_env() finds exactly $XDG_RUNTIME_DIR/$NESTED_WD,
-# regardless of whether this wlroots build would otherwise honor the preset
-# WAYLAND_DISPLAY or auto-pick wayland-1.
-env -u HYPRLAND_INSTANCE_SIGNATURE \
+log "starting nested headless Hyprland (runtime=$NESTED_RUNTIME)…"
+env -u HYPRLAND_INSTANCE_SIGNATURE -u WAYLAND_DISPLAY \
     WLR_BACKENDS=headless \
     WLR_LIBINPUT_NO_DEVICES=1 \
     XDG_RUNTIME_DIR="$NESTED_RUNTIME" \
-    WAYLAND_DISPLAY="$NESTED_WD" \
-    Hyprland --config "$HYPR_CONF" --socket "$NESTED_WD" >"$NESTED_RUNTIME/hypr.log" 2>&1 &
+    Hyprland --config "$HYPR_CONF" >"$NESTED_RUNTIME/hypr.log" 2>&1 &
 HYPR_PID=$!
 
 # ----------------------------------------------------------------------------
@@ -275,6 +275,21 @@ while :; do
   sleep 0.25
 done
 log "nested Hyprland up, signature: $NESTED_SIG"
+
+# Discover the Wayland socket Hyprland auto-created (wayland-1 in this isolated
+# runtime). The daemon's Connection::connect_to_env() needs WAYLAND_DISPLAY set
+# to this name to bind its layer surface to the nested compositor.
+NESTED_WD=""
+for _ in $(seq 1 20); do
+  for w in "$NESTED_RUNTIME"/wayland-[0-9]*; do
+    [[ -S "$w" ]] || continue   # the socket itself, not the wayland-N.lock file
+    NESTED_WD="$(basename "$w")"; break
+  done
+  [[ -n "$NESTED_WD" ]] && break
+  sleep 0.2
+done
+[[ -n "$NESTED_WD" ]] || die "nested Hyprland booted but no wayland-* socket appeared in $NESTED_RUNTIME"
+log "nested Wayland socket: $NESTED_WD"
 
 # ----------------------------------------------------------------------------
 # HARD SAFETY ASSERTION: the nested signature MUST differ from the caller's live
