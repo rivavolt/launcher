@@ -21,6 +21,44 @@ use strsim::jaro_winkler;
 
 const MAX_VISIBLE_ITEMS: usize = 15;
 
+/// Launch `argv` (`argv[0]` is the program) as a detached process, parented to
+/// its OWN transient systemd scope rather than to the launcher.
+///
+/// The launcher runs as a persistent `launcher.service` user unit. A bare
+/// `Command::spawn` makes the launched app a child of that service, so it
+/// inherits the launcher's cgroup — and with it the service's resource limits
+/// AND lifecycle. That bit us hard: with the service capped at MemoryMax=1G a
+/// browser opened through the launcher got pinned at the cap and the kernel
+/// thrashed its pages in a tight reclaim loop (sustained ~1GB/s re-reads, D-state
+/// hangs); and the service's `Restart=always` / a crash would SIGKILL every app
+/// launched through it. So we hand the app off to `systemd-run --user --scope`,
+/// which parents it under its own transient `*.scope` in `app.slice` — its own
+/// cgroup, unbounded by the launcher and surviving the launcher's restarts —
+/// exactly how the compositor launches apps. `--collect` garbage-collects the
+/// scope once the app exits. If `systemd-run` isn't on PATH or fails to start
+/// (no systemd user session, e.g. headless), we fall back to a direct detached
+/// spawn so those environments aren't broken — they just lack the cgroup
+/// isolation.
+fn spawn_detached(argv: &[&str]) {
+    let Some((bin, args)) = argv.split_first() else { return };
+    let scoped = Command::new("systemd-run")
+        .args(["--user", "--scope", "--collect", "--quiet", "--"])
+        .arg(bin)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    if scoped.is_err() {
+        let _ = Command::new(bin)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+}
+
 fn icon_size() -> f32 { (common::text_size() * 1.5).round() }
 fn icon_container() -> f32 { common::icon_container() }
 fn row_padding() -> f32 { (common::text_size() * 0.5).round() }
@@ -499,24 +537,16 @@ impl App {
                         // (no special workspace to dismiss any more), so the
                         // spawned app maps there directly. The harness unmaps
                         // the overlay once this returns and `should_hide` is set.
+                        let term = env::var("TERMINAL").unwrap_or("kitty".into());
+                        let mut argv: Vec<&str> = Vec::with_capacity(args.len() + 3);
                         if *terminal {
-                            let term = env::var("TERMINAL").unwrap_or("kitty".into());
                             let term_bin = term.split_whitespace().next().unwrap_or("kitty");
-                            let _ = Command::new(term_bin)
-                                .arg("-e")
-                                .arg(bin)
-                                .args(args)
-                                .stdin(std::process::Stdio::null())
-                                .stdout(std::process::Stdio::null())
-                                .stderr(std::process::Stdio::null())
-                                .spawn();
-                        } else {
-                            let _ = Command::new(bin).args(args)
-                                .stdin(std::process::Stdio::null())
-                                .stdout(std::process::Stdio::null())
-                                .stderr(std::process::Stdio::null())
-                                .spawn();
+                            argv.push(term_bin);
+                            argv.push("-e");
                         }
+                        argv.push(bin);
+                        argv.extend(args.iter().map(String::as_str));
+                        spawn_detached(&argv);
                     }
                 }
                 Entry::Window { address, .. } => {
