@@ -284,14 +284,14 @@ impl App {
     fn load_entries(&mut self, ctx: &Context) {
         let old_selected = self.selected;
         // Memoized icon index — see the field doc. build_icon_index walks every
-        // theme/size/category dir and cache_svgs spawns `magick` per uncached
-        // SVG, both too costly to redo on each window add/remove/move. Built
-        // once, then reused; taken out of self for the borrow and put back.
-        let icon_index = self.icon_index.take().unwrap_or_else(|| {
-            let mut idx = desktop::build_icon_index();
-            desktop::cache_svgs(&mut idx);
-            idx
-        });
+        // theme/size/category dir, too costly to redo on each window
+        // add/remove/move. Built once, then reused; taken out of self for the
+        // borrow and put back. SVGs in the index are rasterized lazily in
+        // `load_icon` (resvg), so no pre-conversion pass is needed.
+        let icon_index = self
+            .icon_index
+            .take()
+            .unwrap_or_else(desktop::build_icon_index);
         let desktop_entries = desktop::collect_entries();
         let wmclass_icons = desktop::wmclass_icon_map(&desktop_entries, &icon_index);
 
@@ -874,13 +874,36 @@ fn main() {
 }
 
 fn load_icon(ctx: &Context, path: &PathBuf) -> Option<egui::TextureHandle> {
+    let color_image = if path.extension().is_some_and(|e| e == "svg") {
+        rasterize_svg(path)?
+    } else {
+        let data = fs::read(path).ok()?;
+        let img = image::load_from_memory(&data).ok()?.to_rgba8();
+        let size = [img.width() as usize, img.height() as usize];
+        egui::ColorImage::from_rgba_unmultiplied(size, &img.into_raw())
+    };
+    Some(ctx.load_texture(path.to_string_lossy(), color_image, egui::TextureOptions::LINEAR))
+}
+
+/// Rasterize an SVG icon in-process via resvg (replacing a `magick` subprocess
+/// + an undeclared ImageMagick dependency). Fits the larger dimension to 128px;
+/// tiny-skia produces premultiplied RGBA, which egui takes directly.
+fn rasterize_svg(path: &PathBuf) -> Option<egui::ColorImage> {
     let data = fs::read(path).ok()?;
-    let img = image::load_from_memory(&data).ok()?.to_rgba8();
-    let size = [img.width() as usize, img.height() as usize];
-    Some(ctx.load_texture(
-        path.to_string_lossy(),
-        egui::ColorImage::from_rgba_unmultiplied(size, &img.into_raw()),
-        egui::TextureOptions::LINEAR,
+    let tree = resvg::usvg::Tree::from_data(&data, &resvg::usvg::Options::default()).ok()?;
+    let svg = tree.size();
+    let scale = 128.0 / svg.width().max(svg.height());
+    let w = (svg.width() * scale).round().max(1.0) as u32;
+    let h = (svg.height() * scale).round().max(1.0) as u32;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    Some(egui::ColorImage::from_rgba_premultiplied(
+        [w as usize, h as usize],
+        pixmap.data(),
     ))
 }
 

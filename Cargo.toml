@@ -37,11 +37,14 @@ eframe = { version = "0.33", default-features = false, features = ["default_font
 wayapp = { path = "vendor/wayapp" }
 smithay-client-toolkit = "0.20"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+# In-process SVG icon rasterization, replacing a `magick` subprocess (and an
+# undeclared ImageMagick runtime dep). `default-features = false` drops resvg's
+# text/font stack (rustybuzz/fontdb) — app/icon-theme SVGs have no <text>.
+resvg = { version = "0.45", default-features = false }
 nucleo-matcher = "0.3"
 strsim = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-regex = "1"
 notify = { version = "7", default-features = false, features = ["macos_kqueue"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 wayland-clipboard-listener = { version = "0.6", features = ["wlr-data-control"] }

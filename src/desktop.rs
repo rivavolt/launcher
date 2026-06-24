@@ -319,46 +319,6 @@ pub fn build_icon_index() -> HashMap<String, PathBuf> {
     index
 }
 
-/// Convert SVG icons to cached PNGs via ImageMagick.
-/// Updates the index in-place to point to the cached PNG paths.
-pub fn cache_svgs(index: &mut HashMap<String, PathBuf>) {
-    let cache_dir = svg_cache_dir();
-    let _ = fs::create_dir_all(&cache_dir);
-
-    for (name, path) in index.iter_mut() {
-        if path.extension().is_some_and(|e| e == "svg") {
-            let cached = cache_dir.join(format!("{name}.png"));
-
-            if cached.exists() {
-                *path = cached;
-                continue;
-            }
-
-            let output = format!("png32:{}", cached.display());
-            let ok = std::process::Command::new("magick")
-                .args([
-                    std::ffi::OsStr::new("-background"),
-                    std::ffi::OsStr::new("none"),
-                    path.as_os_str(),
-                    std::ffi::OsStr::new("-resize"),
-                    std::ffi::OsStr::new("128x128"),
-                    std::ffi::OsStr::new(&output),
-                ])
-                .status()
-                .is_ok_and(|s| s.success());
-
-            if ok {
-                *path = cached;
-            }
-        }
-    }
-}
-
-fn svg_cache_dir() -> PathBuf {
-    let runtime = env::var("XDG_RUNTIME_DIR").unwrap_or("/tmp".into());
-    PathBuf::from(runtime).join("launcher-svg-cache")
-}
-
 /// Build WMClass to icon path mapping from already-parsed desktop entries
 pub fn wmclass_icon_map(entries: &[DesktopEntry], icon_index: &HashMap<String, PathBuf>) -> HashMap<String, PathBuf> {
     let mut map = HashMap::new();
